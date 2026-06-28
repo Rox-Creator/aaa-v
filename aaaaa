@@ -4646,6 +4646,9 @@ local function setBuffTarget(key, s)
 end
 
 -- ===== Tab: Main =====
+-- Each tab's UI is wrapped in do...end so its locals free between tabs, keeping the main
+-- chunk under Lua's 200-local-per-function limit (it overflowed at secScript otherwise).
+do
 local tabMain = window:Tab("Main", "home")
 
 local secHorse = tabMain:Section("Horse", "Left", "Mount Tweaks")
@@ -4678,7 +4681,9 @@ secEls:Toggle("Distance", PLAYER_ESP.ShowDistance, function(v) PLAYER_ESP.ShowDi
 secEls:Toggle("Tracer", PLAYER_ESP.ShowTracer, function(v) PLAYER_ESP.ShowTracer = v end)
 secEls:Toggle("Health Bar", PLAYER_ESP.ShowHealthBar, function(v) PLAYER_ESP.ShowHealthBar = v end)
 
+end  -- /Main tab
 -- ===== Tab: Character =====
+do
 local tabChar = window:Tab("Character", "user")
 
 local secAck = tabChar:Section("Ackerman", "Left", "Type Values, Then Pin")
@@ -4760,7 +4765,9 @@ secTitan:Toggle("Musket Extender", Features.MusketExtender, function(v)
 end):Tooltip("ranged nape envelop (musket/crossbow)")
 secTitan:Slider("Range", NapeFollowRange, 1, 30, 900, "", function(v) NapeFollowRange = v end)
 
+end  -- /Character tab
 -- ===== Settings tab (built-in) =====
+do
 local setTab = window:AddSettingsTab("cog")
 
 local accentState = { on = false, color = YELLOW_A }
@@ -4785,6 +4792,7 @@ local secScript = setTab:Section("Script", "Right", "Config & Exit")
 secScript:Button("Reset Defaults", function() pcall(resetConfig); Lib:Notify("Verfall", "reset — reload script to refresh the menu", 4) end)
 secScript:Button("Unload", function() pcall(UnloadScript) end):SetRisk()
 
+end  -- /Settings tab
 -- Re-apply persisted feature state (config auto-loads above).
 if Features.HorseBoost then pcall(applyHorseBoost) end
 if Features.NoGrab or Features.NoStomp or Features.NoBite then pcall(refreshAntiTitan) end
