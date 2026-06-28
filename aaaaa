@@ -4562,6 +4562,12 @@ pcall(function() setrobloxinput(true) end)
 -- global `INSui` (its built-in side channel). So we always fall back to that global.
 local Lib
 do
+    -- Forked UI lib (bigger panel text + click-logo-to-minimize) is tried FIRST; if it ever
+    -- fails to fetch/parse, we fall straight through to upstream INS-ui so the menu still loads.
+    local UI_URLS = {
+        "https://raw.githubusercontent.com/Rox-Creator/aaa-v/main/uilib.lua",          -- forked
+        "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua",  -- upstream fallback
+    }
     local lastBody
     local function grabGlobal()
         if type(Lib) == "table" then return end
@@ -4569,17 +4575,20 @@ do
         if type(Lib) ~= "table" then pcall(function() if type(_G.INSui) == "table" then Lib = _G.INSui end end) end
         if type(Lib) ~= "table" then pcall(function() local g = getgenv(); if g and type(g.INSui) == "table" then Lib = g.INSui end end) end
     end
-    for _ = 1, 8 do
-        local body = nil
-        pcall(function() body = game:HttpGet("https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua") end)
-        if type(body) == "string" and #body > 1000 and body:find("INSUI_FILE_END", 1, true) then
-            lastBody = body
-            local ok, res = pcall(function() return loadstring(body)() end)
-            if ok and type(res) == "table" then Lib = res; break end
-            grabGlobal()                 -- Matcha path: return dropped, INSui global set
-            if type(Lib) == "table" then break end
+    for _, url in ipairs(UI_URLS) do
+        for _ = 1, 5 do
+            local body = nil
+            pcall(function() body = game:HttpGet(url) end)
+            if type(body) == "string" and #body > 1000 and body:find("INSUI_FILE_END", 1, true) then
+                lastBody = body
+                local ok, res = pcall(function() return loadstring(body)() end)
+                if ok and type(res) == "table" then Lib = res; break end
+                grabGlobal()             -- Matcha path: return dropped, INSui global set
+                if type(Lib) == "table" then break end
+            end
+            task.wait(0.3)
         end
-        task.wait(0.4)
+        if type(Lib) == "table" then break end
     end
     if type(Lib) ~= "table" and type(lastBody) == "string" then
         pcall(function() loadstring(lastBody)() end)  -- execute → publishes INSui
