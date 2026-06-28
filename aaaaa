@@ -3318,8 +3318,13 @@ applyNapeFollow = function()
         -- (fires first, gives the cube a head start so hits don't whiff) OR IsSwinging, and
         -- hold it 0.4s to comfortably cover the hit frame.
         local active = false
+        local menuOpen = false
+        pcall(function() menuOpen = (LibWindow and LibWindow:IsOpen()) and true or false end)
         pcall(function() if char:GetAttribute("IsSwinging") then active = true end end)
-        pcall(function() if ismouse1pressed() then active = true end end)
+        -- Don't treat M1 as a swing while the menu is OPEN: clicking/dragging the menu holds M1,
+        -- which would force the heavy titan scan on every frame — the real cause of the menu lag.
+        -- (Menu closed = normal play, M1 still gives the swing a head start.)
+        pcall(function() if (not menuOpen) and ismouse1pressed() then active = true end end)
         if active then swingUntil = os.clock() + 0.4 end
         local touchable = os.clock() < swingUntil
         -- falling edge of the swing → restore shrunken limbs once
@@ -4705,22 +4710,21 @@ local function ackSetBoxText(key, s)
     local box = ackBoxes[key]; if not box then return end
     if not pcall(function() box:Set(s) end) then pcall(function() box:SetValue(s) end) end
 end
+-- Per-number pin: each buff gets its own Pin button right under its box (one-shot apply).
+local function ackPin(key, label)
+    local ok = pinAttrOnce(key, key)
+    Lib:Notify("Ackerman", ok and ("Pinned " .. label .. " = " .. fmtNum(BuffsState[key].target))
+        or "ClientInformation not found — join a round first", 2, ok and "success" or "warning")
+end
 for _, e in ipairs(ACK_BUFFS) do
     local key, label = e[1], e[2]
     if BuffsState[key] then
         local def = ACK_DEFAULTS[key] or BuffsState[key].target
         ackBoxes[key] = secAck:Textbox(label, fmtNum(BuffsState[key].target), function(s) ackStore(key, s) end)
             :Tooltip("default: " .. fmtNum(def))
+        secAck:Button("Pin " .. label, function() ackPin(key, label) end)
     end
 end
-secAck:Button("Pin Buffs", function()
-    local ok = false
-    for _, e in ipairs(ACK_BUFFS) do
-        if BuffsState[e[1]] and pinAttrOnce(e[1], e[1]) then ok = true end
-    end
-    Lib:Notify("Ackerman", ok and "Pinned all buffs to your character"
-        or "ClientInformation not found — join a round first", 3, ok and "success" or "warning")
-end):Tooltip("apply every value above to your character")
 secAck:Button("Reset Defaults", function()
     for _, e in ipairs(ACK_BUFFS) do
         local key, def = e[1], ACK_DEFAULTS[e[1]]
@@ -4729,7 +4733,7 @@ secAck:Button("Reset Defaults", function()
             ackSetBoxText(key, fmtNum(def))
         end
     end
-    Lib:Notify("Ackerman", "Reset to defaults - press Pin Buffs to apply", 3, "success")
+    Lib:Notify("Ackerman", "Reset to defaults - press each Pin to apply", 3, "success")
 end):Tooltip("restore the default numbers (shown on each box)")
 
 local secTitan = tabChar:Section("Titans", "Right", "Anti-Hitbox + Weakpoints")
