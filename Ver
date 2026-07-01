@@ -151,12 +151,6 @@ local GUI = {
     EnchantsModal        = nil,   -- { name, rarity, path } for popup
 }
 
--- Features for Tools tab
-local Tools = {
-    ShowRSDiff   = false,
-    ShowEnchants = false,
-}
-
 local Features = {
     HorseBoost  = false,
     PlayerESP   = false,
@@ -239,28 +233,6 @@ local function fmtNum(n)
     return s
 end
 
-local function buffHintText(key)
-    local b = BuffsState[key]
-    if not b then return "" end
-    -- When this buff is actively being typed, preview the buffer value
-    local previewTarget = b.target
-    if GUI.ActiveInput == key and GUI.InputBuffer ~= "" then
-        local n = tonumber(GUI.InputBuffer)
-        if n and n > 0 then previewTarget = n end
-    end
-    if b.type == "mult" then
-        local ratio = previewTarget / math.max(0.0001, b.default)
-        local r = (ratio >= 100) and tostring(math.floor(ratio)) or string.format("%.1f", ratio):gsub("%.0$", "")
-        local s = ("default: %s | %sx normal"):format(fmtNum(b.default), r)
-        if b.clamp then s = s .. " (server clamps to "..fmtNum(b.clamp)..")" end
-        return s
-    else
-        -- "bonus" type — additive bonus to base game value (use ASCII pipe for clean render)
-        local s = ("default: %s | pin: %s"):format(fmtNum(b.default), fmtNum(previewTarget))
-        if b.clamp then s = s .. " (server clamps to "..fmtNum(b.clamp)..")" end
-        return s
-    end
-end
 
 local Horse = {
     MaxSpeed  = 65,
@@ -287,30 +259,9 @@ local PLAYER_ESP = {
 }
 local function espRecolor()
     PLAYER_ESP.Color = Color3.fromRGB(PLAYER_ESP.ColorR, PLAYER_ESP.ColorG, PLAYER_ESP.ColorB)
+    PLAYER_ESP._colVer = (PLAYER_ESP._colVer or 0) + 1   -- bump → drawPlayer recolors once (no per-frame string build)
 end
 
-local NavDefs = {
-    { key = "Main",     label = "Main" },
-    { key = "Tools",    label = "Tools" },
-    { key = "Character", label = "Character" },
-    { key = "Settings", label = "Settings" },
-}
-
--- ============================================================
--- VK NAME LOOKUP
--- ============================================================
-
-local VK_NAMES = {
-    [0x70]="F1",[0x71]="F2",[0x72]="F3",[0x73]="F4",[0x74]="F5",[0x75]="F6",
-    [0x76]="F7",[0x77]="F8",[0x78]="F9",[0x79]="F10",[0x7A]="F11",[0x7B]="F12",
-    [0x2D]="Insert",[0x2E]="Delete",[0x24]="Home",[0x23]="End",[0x21]="PgUp",[0x22]="PgDn",
-    [0x60]="Num0",[0x61]="Num1",[0x62]="Num2",[0x63]="Num3",[0x64]="Num4",[0x65]="Num5",
-    [0x66]="Num6",[0x67]="Num7",[0x68]="Num8",[0x69]="Num9",
-}
-for i = 0x41, 0x5A do VK_NAMES[i] = string.char(i) end
-local VK_SCAN = {}
-for code in pairs(VK_NAMES) do table.insert(VK_SCAN, code) end
-local function GetKeyName(vk) return VK_NAMES[vk] or string.format("0x%02X", vk) end
 
 -- ============================================================
 -- HELPERS
@@ -319,27 +270,9 @@ local function GetKeyName(vk) return VK_NAMES[vk] or string.format("0x%02X", vk)
 local function IsInside(mx, my, x, y, w, h)
     return mx >= x and mx <= x + w and my >= y and my <= y + h
 end
-local function clamp01(v) return v < 0 and 0 or (v > 1 and 1 or v) end
-local function lighten(c, amt)
-    return Color3.new(clamp01(c.R+amt), clamp01(c.G+amt), clamp01(c.B+amt))
-end
-local function lerpColor(a, b, t)
-    return Color3.new(a.R+(b.R-a.R)*t, a.G+(b.G-a.G)*t, a.B+(b.B-a.B)*t)
-end
-local function pressEffect(el, base)
-    task.spawn(function()
-        pcall(function() el.Color = lighten(base, 0.28) end)
-        task.wait(0.09)
-        pcall(function() el.Color = base end)
-    end)
-end
-local function newAnimToken() GUI.AnimToken = GUI.AnimToken + 1; return GUI.AnimToken end
-local function isAnimCurrent(t) return t == GUI.AnimToken end
 local function toast(msg) pcall(function() notify(msg, "Verfall", 2) end) end
 
 -- Forward declarations.
-local CreateContent, ClearContent, MoveWindow, animateMainTabUnderline
-local CreateSubTabs, ClearSubTabs
 local saveConfig, loadConfig, resetConfig
 local applyHorseBoost, restoreHorse
 local applyHookRange, restoreHookRange
@@ -353,300 +286,8 @@ local applyMusketExtender, restoreMusketExtender
 local applyNoAttack, restoreNoAttack
 local applyBladeDura, restoreBladeDura
 local applyCanRollUnlock, restoreCanRollUnlock
-local pinBuffOnce  -- one-shot Ackerman buff pin (button, no looping Heartbeat)
 local LibWindow    -- INS-ui window handle (set at startup; used by UnloadScript)
-local BuildRSDiffPanel, ClearRSDiffPanel
-local BuildEnchantsPanel, ClearEnchantsPanel, FetchEnchants
 
--- ============================================================
--- DRAW HELPERS (same as original Verfall)
--- ============================================================
-
-local function DrawCard(x, y, w, h, title, zb)
-    local bg = Drawing.new("Square")
-    bg.Position = Vector2.new(x, y); bg.Size = Vector2.new(w, h)
-    bg.Color = Colors.CardBg; bg.Filled = true; bg.Corner = 5
-    bg.Visible = true; bg.ZIndex = zb
-    table.insert(GUI.ContentElements, bg)
-
-    local border = Drawing.new("Square")
-    border.Position = Vector2.new(x, y); border.Size = Vector2.new(w, h)
-    border.Color = Colors.CardBorder; border.Filled = false; border.Corner = 5
-    border.Thickness = 1; border.Visible = true; border.ZIndex = zb + 1
-    table.insert(GUI.ContentElements, border)
-
-    if title and title ~= "" then
-        local t = Drawing.new("Text")
-        t.Position = Vector2.new(x + Config.CardPad, y + 10)
-        t.Text = title; t.Color = Colors.AccentRed; t.Size = 16
-        t.Font = Drawing.Fonts.SystemBold; t.Center = false; t.Outline = false
-        t.Visible = true; t.ZIndex = zb + 3
-        table.insert(GUI.ContentElements, t)
-
-        local ul = Drawing.new("Line")
-        ul.From = Vector2.new(x + 1, y + 38); ul.To = Vector2.new(x + w - 1, y + 38)
-        ul.Color = Colors.AccentRed; ul.Thickness = 1; ul.Visible = true; ul.ZIndex = zb + 3
-        table.insert(GUI.ContentElements, ul)
-    end
-    return y + 52
-end
-
-local function animateToggle(knob, bg, fromX, toX, knobY, newOn)
-    local fromC = newOn and Colors.ToggleOff or Colors.ToggleOn
-    local toC   = newOn and Colors.ToggleOn or Colors.ToggleOff
-    task.spawn(function()
-        for s = 1, 6 do
-            local et = 1 - (1 - s / 6) ^ 3
-            pcall(function() knob.Position = Vector2.new(fromX + (toX - fromX) * et, knobY) end)
-            pcall(function() bg.Color = lerpColor(fromC, toC, et) end)
-            task.wait(0.012)
-        end
-    end)
-end
-
-local function DrawCardToggleRow(cardX, cardW, curY, label, isOn, zb, onFlip)
-    local lx = cardX + Config.CardPad
-    local rightEdge = cardX + cardW - Config.CardPad
-    local lbl = Drawing.new("Text")
-    lbl.Position = Vector2.new(lx, curY + 2); lbl.Text = label
-    lbl.Color = Colors.TextPrimary; lbl.Size = 14; lbl.Font = Drawing.Fonts.System
-    lbl.Center = false; lbl.Outline = false; lbl.Visible = true; lbl.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, lbl)
-    local tw, th = Config.ToggleW, Config.ToggleH
-    local toggleX = rightEdge - tw
-    local offX = toggleX + 2
-    local onX  = toggleX + tw - th + 2
-    local knobC = (th - 4) / 2
-    local knobY = curY + 1 + th / 2
-    local bg = Drawing.new("Square")
-    bg.Position = Vector2.new(toggleX, curY + 1); bg.Size = Vector2.new(tw, th)
-    bg.Color = isOn and Colors.ToggleOn or Colors.ToggleOff
-    bg.Filled = true; bg.Corner = 8; bg.Visible = true; bg.ZIndex = zb + 3
-    table.insert(GUI.ContentElements, bg)
-    local knob = Drawing.new("Circle")
-    knob.Position = Vector2.new((isOn and onX or offX) + knobC, knobY); knob.Radius = knobC
-    knob.Color = Color3.fromRGB(230, 230, 235); knob.Filled = true
-    knob.NumSides = 16; knob.Visible = true; knob.ZIndex = zb + 4
-    table.insert(GUI.ContentElements, knob)
-    local state = isOn
-    local hoverInfo = { el = bg, base = isOn and Colors.ToggleOn or Colors.ToggleOff }
-    table.insert(GUI.Clickables, {
-        x = toggleX - 20, y = curY, w = tw + 20, h = th + 4,
-        onClick = function()
-            onFlip()
-            local oldOn = state
-            local newOn = not oldOn
-            state = newOn
-            hoverInfo.base = newOn and Colors.ToggleOn or Colors.ToggleOff
-            animateToggle(knob, bg, (oldOn and onX or offX) + knobC, (newOn and onX or offX) + knobC, knobY, newOn)
-        end,
-        hover = hoverInfo,
-    })
-    return curY + Config.RowHeight
-end
-
-local function DrawSlider(px, py, value, minV, maxV, width, zb)
-    local frac = clamp01((value - minV) / (maxV - minV))
-    local fillW = math.max(2, frac * width)
-    local track = Drawing.new("Square")
-    track.Position = Vector2.new(px, py); track.Size = Vector2.new(width, Config.SliderH)
-    track.Color = Colors.ToggleOff; track.Filled = true; track.Corner = 4
-    track.Visible = true; track.ZIndex = zb
-    table.insert(GUI.ContentElements, track)
-    local fill = Drawing.new("Square")
-    fill.Position = Vector2.new(px, py); fill.Size = Vector2.new(fillW, Config.SliderH)
-    fill.Color = Colors.SliderFill; fill.Filled = true; fill.Corner = 4
-    fill.Visible = true; fill.ZIndex = zb + 1
-    table.insert(GUI.ContentElements, fill)
-    local knob = Drawing.new("Circle")
-    knob.Position = Vector2.new(px + fillW, py + Config.SliderH / 2); knob.Radius = 5
-    knob.Color = Color3.fromRGB(200, 210, 240); knob.Filled = true
-    knob.NumSides = 16; knob.Visible = true; knob.ZIndex = zb + 2
-    table.insert(GUI.ContentElements, knob)
-    return fill, knob
-end
-
-local function DrawCardSliderRow(cardX, cardW, curY, label, value, minV, maxV, zb, onChange, onLive, valSize, valDX, valDY)
-    local lx = cardX + Config.CardPad
-    local rightEdge = cardX + cardW - Config.CardPad
-    local lbl = Drawing.new("Text")
-    lbl.Position = Vector2.new(lx, curY); lbl.Text = label
-    lbl.Color = Colors.TextPrimary; lbl.Size = 13; lbl.Font = Drawing.Fonts.System
-    lbl.Center = false; lbl.Outline = false; lbl.Visible = true; lbl.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, lbl)
-    local valText = Drawing.new("Text")
-    valText.Position = Vector2.new(rightEdge - 28 + (valDX or 0), curY + (valDY or 0)); valText.Text = tostring(math.floor(value))
-    valText.Color = Colors.Accent; valText.Size = valSize or 13; valText.Font = Drawing.Fonts.System
-    valText.Center = true; valText.Outline = false; valText.Visible = true; valText.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, valText)
-    local sliderX = lx
-    local sliderW = cardW - Config.CardPad * 2
-    local sy = curY + 20
-    local fill, knob = DrawSlider(sliderX, sy, value, minV, maxV, sliderW, zb + 3)
-    table.insert(GUI.Clickables, {
-        x = sliderX - 6, y = sy - 8, w = sliderW + 12, h = Config.SliderH + 16,
-        isSlider = true,
-        onClick = function(mx)
-            local frac = clamp01((mx - sliderX) / sliderW)
-            local val = math.floor(minV + frac * (maxV - minV) + 0.5)
-            onChange(val)
-            local fr = clamp01((val - minV) / (maxV - minV))
-            pcall(function() fill.Size = Vector2.new(math.max(2, fr * sliderW), Config.SliderH) end)
-            pcall(function() knob.Position = Vector2.new(sliderX + fr * sliderW, sy + Config.SliderH / 2) end)
-            pcall(function() valText.Text = tostring(val) end)
-            if onLive then pcall(onLive) end
-        end,
-    })
-    return curY + SLIDER_ROW_H
-end
-
--- Buff number-input row: [Label] [click-to-type box] [Pin button]
--- Below the row: small hint text "default: X | pin: Y"
--- The Pin button applies the typed value ONCE (no looping Heartbeat).
-local BUFF_ROW_H = 38  -- fits label + box + hint; tightened to declutter the Character tab
-
-local function DrawCardBuffRow(cardX, cardW, curY, buffKey, label, zb)
-    local lx = cardX + Config.CardPad
-    local rightEdge = cardX + cardW - Config.CardPad
-
-    local b = BuffsState[buffKey]
-    if not b then return curY + BUFF_ROW_H end
-
-    -- Label (vertically centered against the taller box)
-    local lbl = Drawing.new("Text")
-    lbl.Position = Vector2.new(lx, curY + 5); lbl.Text = label
-    lbl.Color = Colors.TextPrimary; lbl.Size = 14; lbl.Font = Drawing.Fonts.System
-    lbl.Center = false; lbl.Outline = false; lbl.Visible = true; lbl.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, lbl)
-
-    -- "Pin" button (right side) — applies the value ONCE
-    local btnW, btnH = 46, 24
-    local btnX = rightEdge - btnW
-    local btnY = curY
-    local btnBg = Drawing.new("Square")
-    btnBg.Position = Vector2.new(btnX, btnY); btnBg.Size = Vector2.new(btnW, btnH)
-    btnBg.Color = Colors.AccentDim; btnBg.Filled = true; btnBg.Corner = 5
-    btnBg.Visible = true; btnBg.ZIndex = zb + 3
-    table.insert(GUI.ContentElements, btnBg)
-    local btnBorder = Drawing.new("Square")
-    btnBorder.Position = Vector2.new(btnX, btnY); btnBorder.Size = Vector2.new(btnW, btnH)
-    btnBorder.Color = Colors.Border; btnBorder.Filled = false; btnBorder.Corner = 5
-    btnBorder.Thickness = 1; btnBorder.Visible = true; btnBorder.ZIndex = zb + 4
-    table.insert(GUI.ContentElements, btnBorder)
-    local btnTxt = Drawing.new("Text")
-    btnTxt.Position = Vector2.new(btnX + btnW / 2, btnY + btnH / 2); btnTxt.Text = "Pin"
-    btnTxt.Color = Colors.TextPrimary; btnTxt.Size = 13; btnTxt.Font = Drawing.Fonts.SystemBold
-    btnTxt.Center = true; btnTxt.Outline = false; btnTxt.Visible = true; btnTxt.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, btnTxt)
-    table.insert(GUI.Clickables, {
-        x = btnX, y = btnY, w = btnW, h = btnH,
-        onClick = function() pressEffect(btnBg, Colors.AccentDim); pinBuffOnce(buffKey) end,
-        hover = { el = btnBg, base = Colors.AccentDim },
-    })
-
-    -- Number input box (between label and button) — bigger, text centered both axes
-    local boxW, boxH = 80, 24
-    local boxX = btnX - boxW - 10
-    local boxY = curY
-    local box = Drawing.new("Square")
-    box.Position = Vector2.new(boxX, boxY); box.Size = Vector2.new(boxW, boxH)
-    box.Color = Color3.fromRGB(14, 14, 18); box.Filled = true; box.Corner = 4
-    box.Visible = true; box.ZIndex = zb + 3
-    table.insert(GUI.ContentElements, box)
-    local boxBorder = Drawing.new("Square")
-    boxBorder.Position = Vector2.new(boxX, boxY); boxBorder.Size = Vector2.new(boxW, boxH)
-    boxBorder.Color = (GUI.ActiveInput == buffKey) and Colors.Accent or Color3.fromRGB(60, 60, 70)
-    boxBorder.Filled = false; boxBorder.Thickness = 1; boxBorder.Corner = 4
-    boxBorder.Visible = true; boxBorder.ZIndex = zb + 4
-    table.insert(GUI.ContentElements, boxBorder)
-
-    -- Number text inside box (centered both axes)
-    local isEditing = (GUI.ActiveInput == buffKey)
-    local displayed = isEditing and (GUI.InputBuffer == "" and "_" or GUI.InputBuffer) or tostring(b.target)
-    local valTxt = Drawing.new("Text")
-    valTxt.Position = Vector2.new(boxX + boxW / 2, boxY + boxH / 2); valTxt.Text = displayed
-    valTxt.Color = isEditing and Colors.Accent or Colors.TextPrimary
-    valTxt.Size = 14; valTxt.Font = Drawing.Fonts.System
-    valTxt.Center = true; valTxt.Outline = false; valTxt.Visible = true; valTxt.ZIndex = zb + 6
-    table.insert(GUI.ContentElements, valTxt)
-
-    -- Click-to-edit on the number box
-    table.insert(GUI.Clickables, {
-        x = boxX, y = boxY, w = boxW, h = boxH,
-        onClick = function()
-            GUI.ActiveInput = buffKey
-            GUI.InputBuffer = ""  -- start fresh; user types new value
-            CreateContent(GUI.SelectedPage)  -- redraw to show active state
-        end,
-    })
-
-    -- Hint text underneath (default + pin value)
-    local hint = Drawing.new("Text")
-    hint.Position = Vector2.new(lx, curY + 25); hint.Text = buffHintText(buffKey)
-    hint.Color = Colors.TextDim or Color3.fromRGB(140, 140, 150); hint.Size = 11
-    hint.Font = Drawing.Fonts.System; hint.Center = false; hint.Outline = false
-    hint.Visible = true; hint.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, hint)
-
-    return curY + BUFF_ROW_H
-end
-
--- Keybind row helper, shared between Main and Settings pages.
--- backPageKey is which page to rebuild on click ("Main" or "Settings").
-local function DrawKeyBindRow(lx, rightEdge, rowY, label, listening, currentKey, zb, backPageKey, onArm)
-    local lbl = Drawing.new("Text")
-    lbl.Position = Vector2.new(lx, rowY + 4); lbl.Text = label
-    lbl.Color = Colors.TextPrimary; lbl.Size = 14; lbl.Font = Drawing.Fonts.System
-    lbl.Center = false; lbl.Outline = false; lbl.Visible = true; lbl.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, lbl)
-    local btnW, btnH = 90, 24
-    local btnX = rightEdge - btnW
-    local btnY = rowY + 2
-    local btnBg = Drawing.new("Square")
-    btnBg.Position = Vector2.new(btnX, btnY); btnBg.Size = Vector2.new(btnW, btnH)
-    btnBg.Color = listening and Color3.fromRGB(80,40,40) or Color3.fromRGB(30,30,36)
-    btnBg.Filled = true; btnBg.Corner = 5; btnBg.Visible = true; btnBg.ZIndex = zb + 3
-    table.insert(GUI.ContentElements, btnBg)
-    local btnBorder = Drawing.new("Square")
-    btnBorder.Position = Vector2.new(btnX, btnY); btnBorder.Size = Vector2.new(btnW, btnH)
-    btnBorder.Color = listening and Color3.fromRGB(180,60,60) or Colors.Border
-    btnBorder.Filled = false; btnBorder.Corner = 5; btnBorder.Thickness = 1
-    btnBorder.Visible = true; btnBorder.ZIndex = zb + 4
-    table.insert(GUI.ContentElements, btnBorder)
-    local btnText = Drawing.new("Text")
-    btnText.Position = Vector2.new(btnX + btnW / 2, btnY + (btnH - 12) / 1.3 + 0.5)
-    btnText.Text = listening and "..." or GetKeyName(currentKey)
-    btnText.Color = listening and Color3.fromRGB(255,100,100) or Colors.Accent
-    btnText.Size = 12; btnText.Font = Drawing.Fonts.SystemBold; btnText.Center = true
-    btnText.Outline = false; btnText.Visible = true; btnText.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, btnText)
-    table.insert(GUI.Clickables, {
-        x = btnX, y = btnY, w = btnW, h = btnH,
-        onClick = function() onArm(); CreateContent(backPageKey) end,
-    })
-end
-
-local function DrawTextButton(bx, by, bw, bh, label, fg, bgcol, zb, onClick)
-    local bg = Drawing.new("Square")
-    bg.Position = Vector2.new(bx, by); bg.Size = Vector2.new(bw, bh)
-    bg.Color = bgcol; bg.Filled = true; bg.Corner = 5; bg.Visible = true; bg.ZIndex = zb
-    table.insert(GUI.ContentElements, bg)
-    local brd = Drawing.new("Square")
-    brd.Position = Vector2.new(bx, by); brd.Size = Vector2.new(bw, bh)
-    brd.Color = Colors.Border; brd.Filled = false; brd.Corner = 5; brd.Thickness = 1
-    brd.Visible = true; brd.ZIndex = zb + 1
-    table.insert(GUI.ContentElements, brd)
-    local txt = Drawing.new("Text")
-    txt.Position = Vector2.new(bx + bw / 2, by + (bh - 13) / 1.3 + 0.5); txt.Text = label
-    txt.Color = fg; txt.Size = 13; txt.Font = Drawing.Fonts.SystemBold; txt.Center = true
-    txt.Outline = false; txt.Visible = true; txt.ZIndex = zb + 2
-    table.insert(GUI.ContentElements, txt)
-    table.insert(GUI.Clickables, {
-        x = bx, y = by, w = bw, h = bh,
-        onClick = function() pressEffect(bg, bgcol); onClick() end,
-        hover = { el = bg, base = bgcol },
-    })
-end
 
 -- ============================================================
 -- RS DIFF — CORE LOGIC (ported from Rox-Creator/aa)
@@ -980,1948 +621,232 @@ end
 
 local RS_DIFF_COLORS = { ADD = Colors.DiffAdd, DEL = Colors.DiffDel, CLS = Colors.DiffCls }
 
--- ============================================================
--- PAGES
--- ============================================================
-
-local function contentTop() return Config.WinY + Config.HeaderH + Config.SubTabH + Config.ContentPad end
-
-local function PageMainElements()
-    local zb = 13
-    local topY  = contentTop()
-    local leftX = Config.WinX + Config.ContentPad
-    local rightX= leftX + Config.ColW + Config.ColGap
-    local colW  = Config.ColW
-    local horseH = 52 + Config.RowHeight + SLIDER_ROW_H + 12
-    local hY = DrawCard(leftX, topY, colW, horseH, "Horse", zb)
-    hY = DrawCardToggleRow(leftX, colW, hY, "Infinite Stamina", Features.HorseBoost, zb, function()
-        Features.HorseBoost = not Features.HorseBoost
-        if Features.HorseBoost then applyHorseBoost() else restoreHorse() end
-    end)
-    DrawCardSliderRow(leftX, colW, hY, "Max Speed", Horse.MaxSpeed, 65, 145, zb, function(v)
-        Horse.MaxSpeed = v
-        if Features.HorseBoost then applyHorseBoost() end
-    end, nil, 15, 1, 1)
-
-    -- (Never Stops + Combat panel removed 2026-06-15)
-
-    -- RIGHT: Visuals (Player ESP + Titan ESP + keybind)
-    local visH = 52 + 4 * Config.RowHeight + 12
-    local vY = DrawCard(rightX, topY, colW, visH, "Visuals", zb)
-    vY = DrawCardToggleRow(rightX, colW, vY, "Player ESP", Features.PlayerESP, zb, function()
-        Features.PlayerESP = not Features.PlayerESP
-    end)
-    vY = DrawCardToggleRow(rightX, colW, vY, "Titan ESP", Features.TitanESP, zb, function()
-        Features.TitanESP = not Features.TitanESP
-    end)
-    vY = DrawCardToggleRow(rightX, colW, vY, "  Nape Marker", Features.TitanNapeMarker, zb, function()
-        Features.TitanNapeMarker = not Features.TitanNapeMarker
-    end)
-    -- ESP keybind row right under the toggle
-    local visLx = rightX + Config.CardPad
-    local visRightEdge = rightX + colW - Config.CardPad
-    DrawKeyBindRow(visLx, visRightEdge, vY, "ESP Toggle Key", GUI.ListeningForESPKey, GUI.ESPKey, zb, "Main", function() GUI.ListeningForESPKey = true end)
-
-    -- (Buffs card moved to Character tab — 2026-06-08)
-end
-
--- Character tab: hosts the Buffs card (CI attribute pins) and Titans card
--- (anti-hitbox toggles + Hitbox Expander). Renamed from PlaceHolder slot.
-local function PageCharacter()
-    local zb = 13
-    local topY  = contentTop()
-    local leftX = Config.WinX + Config.ContentPad
-    local rightX= leftX + Config.ColW + Config.ColGap
-    local colW  = Config.ColW
-
-    -- LEFT: Ackerman (numeric CI pins + velo/action + musket buffs).
-    -- Musket Range folded in here (was its own card that overflowed the right column);
-    -- it sits where Blade Durability used to be (Blade Dura pin removed per user).
-    local buffsH = 52 + 9 * BUFF_ROW_H + 12
-    local bY = DrawCard(leftX, topY, colW, buffsH, "Ackerman", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "HookRange", "Hook Range", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "GasConservation", "Gas Conservation", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "ReloadSpeed", "Reload Speed", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "OdmVeloCap", "ODM Velo Cap", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "RunSpeed", "Run Speed", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "FirearmRange", "Musket Range", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "OdmHookVeloGain", "Hook Velo Gain", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "OdmPassiveVeloGain", "Passive Velo Gain", zb)
-    bY = DrawCardBuffRow(leftX, colW, bY, "ActionSpeed", "Action Speed", zb)
-
-    -- RIGHT: Titans (anti-hitbox toggles + Hitbox Expander + Musket Extender + No Attack)
-    local titansH = 52 + 8 * Config.RowHeight + SLIDER_ROW_H + 12
-    local tY = DrawCard(rightX, topY, colW, titansH, "Titans", zb)
-    tY = DrawCardToggleRow(rightX, colW, tY, "No Grab", Features.NoGrab, zb, function()
-        Features.NoGrab = not Features.NoGrab
-        refreshAntiTitan()
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "No Stomp", Features.NoStomp, zb, function()
-        Features.NoStomp = not Features.NoStomp
-        refreshAntiTitan()
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "No Bite", Features.NoBite, zb, function()
-        Features.NoBite = not Features.NoBite
-        refreshAntiTitan()
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "No Attack", Features.NoAttack, zb, function()
-        Features.NoAttack = not Features.NoAttack
-        if Features.NoAttack then applyNoAttack() else restoreNoAttack() end
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "Hitbox Expander", Features.NapeFollow, zb, function()
-        Features.NapeFollow = not Features.NapeFollow
-        if Features.NapeFollow then applyNapeFollow() else restoreNapeFollow() end
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "  Extend Nape", Features.ExtendNape, zb, function()
-        Features.ExtendNape = not Features.ExtendNape
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "  Extend Eyes", Features.ExtendEye, zb, function()
-        Features.ExtendEye = not Features.ExtendEye
-    end)
-    tY = DrawCardToggleRow(rightX, colW, tY, "Musket Extender", Features.MusketExtender, zb, function()
-        Features.MusketExtender = not Features.MusketExtender
-        if Features.MusketExtender then applyMusketExtender() else restoreMusketExtender() end
-    end)
-    DrawCardSliderRow(rightX, colW, tY, "Range", NapeFollowRange, 30, 900, zb, function(v)
-        NapeFollowRange = v
-    end, nil, 13, 1, 1)
-end
-
-local function PageMainStyle()
-    local zb = 13
-    local topY  = contentTop()
-    local leftX = Config.WinX + Config.ContentPad
-    local rightX= leftX + Config.ColW + Config.ColGap
-    local colW  = Config.ColW
-    local colorH = 52 + 24 + 3 * SLIDER_ROW_H + 12
-    local cY = DrawCard(leftX, topY, colW, colorH, "ESP Color", zb)
-    local swatchLbl = Drawing.new("Text")
-    swatchLbl.Position = Vector2.new(leftX + Config.CardPad, cY + 2); swatchLbl.Text = "Preview"
-    swatchLbl.Color = Colors.TextPrimary; swatchLbl.Size = 13; swatchLbl.Font = Drawing.Fonts.System
-    swatchLbl.Center = false; swatchLbl.Outline = false; swatchLbl.Visible = true; swatchLbl.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, swatchLbl)
-    local swatch = Drawing.new("Square")
-    swatch.Position = Vector2.new(leftX + colW - Config.CardPad - 46, cY); swatch.Size = Vector2.new(46, 18)
-    swatch.Color = PLAYER_ESP.Color; swatch.Filled = true; swatch.Corner = 4
-    swatch.Visible = true; swatch.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, swatch)
-    local function refreshSwatch() espRecolor(); pcall(function() swatch.Color = PLAYER_ESP.Color end) end
-    cY = cY + 24
-    cY = DrawCardSliderRow(leftX, colW, cY, "Red",   PLAYER_ESP.ColorR, 0, 255, zb, function(v) PLAYER_ESP.ColorR = v end, refreshSwatch, nil, 2, 2)
-    cY = DrawCardSliderRow(leftX, colW, cY, "Green", PLAYER_ESP.ColorG, 0, 255, zb, function(v) PLAYER_ESP.ColorG = v end, refreshSwatch, nil, 2, 2)
-    cY = DrawCardSliderRow(leftX, colW, cY, "Blue",  PLAYER_ESP.ColorB, 0, 255, zb, function(v) PLAYER_ESP.ColorB = v end, refreshSwatch, nil, 2, 2)
-    local elemH = 52 + 5 * Config.RowHeight + 12
-    local eY = DrawCard(rightX, topY, colW, elemH, "ESP Elements", zb)
-    eY = DrawCardToggleRow(rightX, colW, eY, "Box",      PLAYER_ESP.ShowBox, zb, function() PLAYER_ESP.ShowBox = not PLAYER_ESP.ShowBox end)
-    eY = DrawCardToggleRow(rightX, colW, eY, "Name",     PLAYER_ESP.ShowName, zb, function() PLAYER_ESP.ShowName = not PLAYER_ESP.ShowName end)
-    eY = DrawCardToggleRow(rightX, colW, eY, "Distance", PLAYER_ESP.ShowDistance, zb, function() PLAYER_ESP.ShowDistance = not PLAYER_ESP.ShowDistance end)
-    eY = DrawCardToggleRow(rightX, colW, eY, "Tracer",   PLAYER_ESP.ShowTracer, zb, function() PLAYER_ESP.ShowTracer = not PLAYER_ESP.ShowTracer end)
-    eY = DrawCardToggleRow(rightX, colW, eY, "Health Bar", PLAYER_ESP.ShowHealthBar, zb, function() PLAYER_ESP.ShowHealthBar = not PLAYER_ESP.ShowHealthBar end)
-    local distY = topY + elemH + 12
-    local distH = 52 + SLIDER_ROW_H + 12
-    local dY = DrawCard(rightX, distY, colW, distH, "ESP Distance", zb)
-    DrawCardSliderRow(rightX, colW, dY, "Max Distance", PLAYER_ESP.MaxDistance, 0, 100000, zb, function(v)
-        PLAYER_ESP.MaxDistance = v
-    end, nil, 15, 1, 1)
-end
-
--- Tools page — toggles that open floating panels / utilities
-local function PageTools()
-    local zb = 13
-    local topY  = contentTop()
-    local leftX = Config.WinX + Config.ContentPad
-    local rightX= leftX + Config.ColW + Config.ColGap
-    local colW  = Config.ColW
-
-    local toolH = 52 + 2 * Config.RowHeight + 12
-    local tY = DrawCard(leftX, topY, colW, toolH, "Misc Tools", zb)
-    tY = DrawCardToggleRow(leftX, colW, tY, "Show RS Diff", Tools.ShowRSDiff, zb, function()
-        Tools.ShowRSDiff = not Tools.ShowRSDiff
-        GUI.RSDiffOpen   = Tools.ShowRSDiff
-        if Tools.ShowRSDiff then BuildRSDiffPanel() else ClearRSDiffPanel() end
-    end)
-    DrawCardToggleRow(leftX, colW, tY, "Show Enchants", Tools.ShowEnchants, zb, function()
-        Tools.ShowEnchants = not Tools.ShowEnchants
-        GUI.EnchantsOpen   = Tools.ShowEnchants
-        if Tools.ShowEnchants then
-            -- fetch on first open if data is nil
-            if not GUI.EnchantsData then
-                task.spawn(function()
-                    GUI.EnchantsStatus = "Scanning..."
-                    BuildEnchantsPanel()
-                    FetchEnchants()
-                    if GUI.EnchantsOpen then BuildEnchantsPanel() end
-                end)
-            end
-            BuildEnchantsPanel()
-        else
-            ClearEnchantsPanel()
-        end
-    end)
-
-    -- (Anti-Titan card moved to Character tab — 2026-06-08)
-end
-
--- RS Diff floating panel (separate window, draggable by header)
-ClearRSDiffPanel = function()
-    for _, el in ipairs(GUI.RSDiffElements) do pcall(function() el:Remove() end) end
-    GUI.RSDiffElements = {}
-    GUI.RSDiffClickables = {}
-end
-
--- Internal: floating panel renderer. Not a "page", lives in its own draw list.
-BuildRSDiffPanel = function()
-    ClearRSDiffPanel()
-    if not GUI.RSDiffOpen then return end
-
-    local zb = 60  -- above main window
-    local px, py = GUI.RSDiffX, GUI.RSDiffY
-    local pw, ph = GUI.RSDiffW, GUI.RSDiffH
-    local headerH = 34
-
-    -- Panel bg + border
-    local bg = Drawing.new("Square")
-    bg.Position = Vector2.new(px, py); bg.Size = Vector2.new(pw, ph)
-    bg.Color = Color3.fromRGB(16, 16, 20); bg.Filled = true
-    bg.Corner = 6; bg.Transparency = 0.95
-    bg.Visible = true; bg.ZIndex = zb
-    table.insert(GUI.RSDiffElements, bg)
-
-    local brd = Drawing.new("Square")
-    brd.Position = Vector2.new(px, py); brd.Size = Vector2.new(pw, ph)
-    brd.Color = Color3.fromRGB(50, 50, 56); brd.Filled = false
-    brd.Corner = 6; brd.Thickness = 1
-    brd.Visible = true; brd.ZIndex = zb + 1
-    table.insert(GUI.RSDiffElements, brd)
-
-    -- Title bar (drag handle)
-    local titleBg = Drawing.new("Square")
-    titleBg.Position = Vector2.new(px, py); titleBg.Size = Vector2.new(pw, headerH)
-    titleBg.Color = Color3.fromRGB(24, 24, 28); titleBg.Filled = true
-    titleBg.Corner = 6; titleBg.Visible = true; titleBg.ZIndex = zb + 1
-    table.insert(GUI.RSDiffElements, titleBg)
-
-    local titleFill = Drawing.new("Square")
-    titleFill.Position = Vector2.new(px, py + headerH - 6); titleFill.Size = Vector2.new(pw, 6)
-    titleFill.Color = Color3.fromRGB(24, 24, 28); titleFill.Filled = true
-    titleFill.Visible = true; titleFill.ZIndex = zb + 1
-    table.insert(GUI.RSDiffElements, titleFill)
-
-    local titleText = Drawing.new("Text")
-    titleText.Position = Vector2.new(px + 14, py + 8); titleText.Text = "ReplicatedStorage Diff"
-    titleText.Color = Colors.AccentRed; titleText.Size = 17
-    titleText.Font = Drawing.Fonts.SystemBold; titleText.Center = false
-    titleText.Outline = false; titleText.Visible = true; titleText.ZIndex = zb + 3
-    table.insert(GUI.RSDiffElements, titleText)
-
-    -- Status line
-    local statusStr = GUI.RSDiffStatus
-    if statusStr == "" then
-        if GUI.RSSnapshot then
-            statusStr = "Snapshot: " .. GUI.RSSnapshotCount .. " paths, " .. rsTimeAgo(GUI.RSSnapshotAt) .. ". Click Compare to diff."
-        else
-            statusStr = "No snapshot yet. Click 'Snapshot' or 'Load Saved' to start."
-        end
-    end
-    local status = Drawing.new("Text")
-    status.Position = Vector2.new(px + 220, py + 10); status.Text = statusStr
-    status.Color = Colors.TextMuted; status.Size = 13
-    status.Font = Drawing.Fonts.System; status.Center = false
-    status.Outline = false; status.Visible = true; status.ZIndex = zb + 3
-    table.insert(GUI.RSDiffElements, status)
-
-    -- Close X (top-right of header)
-    local closeX = px + pw - 28
-    local closeY = py + 6
-    local closeText = Drawing.new("Text")
-    closeText.Position = Vector2.new(closeX + 6, closeY + 2); closeText.Text = "X"
-    closeText.Color = Colors.AccentRed; closeText.Size = 17
-    closeText.Font = Drawing.Fonts.SystemBold; closeText.Center = false
-    closeText.Outline = false; closeText.Visible = true; closeText.ZIndex = zb + 3
-    table.insert(GUI.RSDiffElements, closeText)
-    table.insert(GUI.RSDiffClickables, {
-        x = closeX, y = closeY, w = 24, h = 24,
-        onClick = function()
-            GUI.RSDiffOpen = false
-            Tools.ShowRSDiff = false
-            ClearRSDiffPanel()
-            if GUI.SelectedPage == "Tools" then CreateContent("Tools") end
-        end
-    })
-
-    -- Action buttons (Snapshot / Compare / Load Saved / Clear)
-    local actionY = py + headerH + 6
-    local btnH = 28
-    local btnGap = 10
-    local actionX = px + 14
-    local function actionBtn(label, color, onClick, customW)
-        local w = customW or 110
-        local bgBtn = Drawing.new("Square")
-        bgBtn.Position = Vector2.new(actionX, actionY); bgBtn.Size = Vector2.new(w, btnH)
-        bgBtn.Color = color; bgBtn.Filled = true; bgBtn.Corner = 4
-        bgBtn.Visible = true; bgBtn.ZIndex = zb + 3
-        table.insert(GUI.RSDiffElements, bgBtn)
-        local txt = Drawing.new("Text")
-        txt.Position = Vector2.new(actionX + w / 2, actionY + (btnH - 13) / 1.3 + 0.5)
-        txt.Text = label; txt.Color = Color3.fromRGB(220, 220, 230)
-        txt.Size = 13; txt.Font = Drawing.Fonts.SystemBold
-        txt.Center = true; txt.Outline = false
-        txt.Visible = true; txt.ZIndex = zb + 4
-        table.insert(GUI.RSDiffElements, txt)
-        table.insert(GUI.RSDiffClickables, {
-            x = actionX, y = actionY, w = w, h = btnH, onClick = onClick,
-        })
-        actionX = actionX + w + btnGap
-    end
-
-    local hasSnap    = GUI.RSSnapshot ~= nil
-    local confirming = GUI.RSOverwriteConfirmAt and (tick() - GUI.RSOverwriteConfirmAt < 3)
-    local snapLabel, snapColor
-    if confirming then
-        snapLabel = "Overwrite?"; snapColor = Color3.fromRGB(180, 60, 60)
-    elseif hasSnap then
-        snapLabel = "Overwrite"; snapColor = Color3.fromRGB(50, 50, 60)
-    else
-        snapLabel = "Snapshot"; snapColor = Color3.fromRGB(50, 50, 60)
-    end
-    actionBtn(snapLabel, snapColor, function()
-        if hasSnap and not confirming then
-            GUI.RSOverwriteConfirmAt = tick()
-            GUI.RSDiffStatus = "Click again within 3s to overwrite."
-            BuildRSDiffPanel(); return
-        end
-        GUI.RSOverwriteConfirmAt = nil
-        GUI.RSDiffStatus = "Snapshotting..."
-        BuildRSDiffPanel()
-        task.spawn(function()
-            local snap, count = TakeRSSnapshot()
-            GUI.RSSnapshot = snap
-            GUI.RSSnapshotCount = count
-            local okT, t = pcall(os.time)
-            GUI.RSSnapshotAt = okT and t or nil
-            GUI.RSDiffResults = nil
-            GUI.RSDiffScrollOffset = 0
-            local ok, err = saveRSSnapshot()
-            if ok then
-                GUI.RSDiffStatus = "Snapshot saved: " .. count .. " paths."
-            else
-                GUI.RSDiffStatus = "Captured " .. count .. " paths, save failed: " .. tostring(err)
-            end
-            if GUI.RSDiffOpen then BuildRSDiffPanel() end
-        end)
-    end)
-
-    actionBtn("Compare", Color3.fromRGB(40, 60, 90), function()
-        if not GUI.RSSnapshot then
-            GUI.RSDiffStatus = "No snapshot. Click 'Snapshot' first."
-            BuildRSDiffPanel(); return
-        end
-        GUI.RSDiffStatus = "Comparing..."
-        BuildRSDiffPanel()
-        task.spawn(function()
-            local cur = TakeRSSnapshot()
-            local res = CompareRSSnapshots(GUI.RSSnapshot, cur)
-            GUI.RSDiffResults = res
-            GUI.RSDiffScrollOffset = 0
-            GUI.RSDiffStatus = #res .. " changes since snapshot."
-            if GUI.RSDiffOpen then BuildRSDiffPanel() end
-        end)
-    end)
-
-    actionBtn("Load Saved", Color3.fromRGB(50, 70, 40), function()
-        local exists = false
-        pcall(function() exists = isfile and isfile(RS_SNAPSHOT_PATH) end)
-        if not exists then
-            GUI.RSDiffStatus = "No saved snapshot file on disk."
-            BuildRSDiffPanel(); return
-        end
-        GUI.RSDiffStatus = "Loading..."
-        BuildRSDiffPanel()
-        task.spawn(function()
-            loadRSSnapshot()
-            if GUI.RSSnapshot then
-                GUI.RSDiffStatus = "Loaded " .. (GUI.RSSnapshotCount or 0) .. " paths from disk."
-            else
-                GUI.RSDiffStatus = "Load failed (see console)."
-            end
-            if GUI.RSDiffOpen then BuildRSDiffPanel() end
-        end)
-    end)
-
-    actionBtn("Clear", Color3.fromRGB(80, 40, 40), function()
-        GUI.RSDiffResults = nil
-        GUI.RSDiffScrollOffset = 0
-        GUI.RSDiffStatus = ""
-        BuildRSDiffPanel()
-    end)
-
-    -- Legend on the right
-    local legend = Drawing.new("Text")
-    legend.Position = Vector2.new(px + pw - 150, actionY + 8); legend.Text = "ADD  DEL  CLS"
-    legend.Color = Colors.TextMuted; legend.Size = 12
-    legend.Font = Drawing.Fonts.System; legend.Center = false
-    legend.Outline = false; legend.Visible = true; legend.ZIndex = zb + 3
-    table.insert(GUI.RSDiffElements, legend)
-
-    -- Separator under action bar
-    local sepY = actionY + btnH + 6
-    local sep = Drawing.new("Line")
-    sep.From = Vector2.new(px + 4, sepY); sep.To = Vector2.new(px + pw - 4, sepY)
-    sep.Color = Color3.fromRGB(40, 40, 46); sep.Thickness = 1
-    sep.Visible = true; sep.ZIndex = zb + 2
-    table.insert(GUI.RSDiffElements, sep)
-
-    -- Results list
-    local listY = sepY + 8
-    local listX = px + 14
-    local listW = pw - 28 - 26
-    local listH = ph - (listY - py) - 14
-    local rowH = 18
-    local maxVisible = math.floor(listH / rowH)
-
-    local results = GUI.RSDiffResults
-    if not results then
-        local hint = Drawing.new("Text")
-        hint.Position = Vector2.new(px + pw / 2, listY + listH / 2 - 8)
-        hint.Text = GUI.RSSnapshot
-            and "Snapshot stored. Click 'Compare' after the game updates."
-            or  "Click 'Snapshot' to record now, or 'Load Saved' to pull the last on-disk snapshot."
-        hint.Color = Colors.TextMuted; hint.Size = 13
-        hint.Font = Drawing.Fonts.System; hint.Center = true
-        hint.Outline = false; hint.Visible = true; hint.ZIndex = zb + 3
-        table.insert(GUI.RSDiffElements, hint)
-    elseif #results == 0 then
-        local hint = Drawing.new("Text")
-        hint.Position = Vector2.new(px + pw / 2, listY + listH / 2 - 8)
-        hint.Text = "No changes detected since last snapshot."
-        hint.Color = Colors.DiffAdd; hint.Size = 14
-        hint.Font = Drawing.Fonts.SystemBold; hint.Center = true
-        hint.Outline = false; hint.Visible = true; hint.ZIndex = zb + 3
-        table.insert(GUI.RSDiffElements, hint)
-    else
-        local maxOffset = math.max(0, #results - maxVisible)
-        if GUI.RSDiffScrollOffset > maxOffset then GUI.RSDiffScrollOffset = maxOffset end
-        if GUI.RSDiffScrollOffset < 0 then GUI.RSDiffScrollOffset = 0 end
-
-        for i = 1, math.min(maxVisible, #results - GUI.RSDiffScrollOffset) do
-            local r = results[i + GUI.RSDiffScrollOffset]
-            if r then
-                local yy = listY + (i - 1) * rowH
-                local kindLbl = Drawing.new("Text")
-                kindLbl.Position = Vector2.new(listX, yy); kindLbl.Text = r.kind
-                kindLbl.Color = RS_DIFF_COLORS[r.kind] or Colors.TextPrimary
-                kindLbl.Size = 13; kindLbl.Font = Drawing.Fonts.SystemBold
-                kindLbl.Center = false; kindLbl.Outline = false; kindLbl.Visible = true; kindLbl.ZIndex = zb + 5
-                table.insert(GUI.RSDiffElements, kindLbl)
-                local pathLbl = Drawing.new("Text")
-                pathLbl.Position = Vector2.new(listX + 36, yy); pathLbl.Text = r.path .. " " .. (r.detail or "")
-                pathLbl.Color = Colors.TextPrimary; pathLbl.Size = 12
-                pathLbl.Font = Drawing.Fonts.System; pathLbl.Center = false
-                pathLbl.Outline = false; pathLbl.Visible = true; pathLbl.ZIndex = zb + 5
-                table.insert(GUI.RSDiffElements, pathLbl)
-            end
-        end
-
-        -- Scroll buttons on the right
-        local sbX = px + pw - 14 - 22
-        local sbH = 22
-        local function sbBtn(yy, label, onClick)
-            local bgB = Drawing.new("Square")
-            bgB.Position = Vector2.new(sbX, yy); bgB.Size = Vector2.new(22, sbH)
-            bgB.Color = Color3.fromRGB(40, 40, 46); bgB.Filled = true; bgB.Corner = 4
-            bgB.Visible = true; bgB.ZIndex = zb + 3
-            table.insert(GUI.RSDiffElements, bgB)
-            local txt = Drawing.new("Text")
-            txt.Position = Vector2.new(sbX + 11, yy + (sbH - 13) / 1.3)
-            txt.Text = label; txt.Color = Colors.TextPrimary; txt.Size = 13
-            txt.Font = Drawing.Fonts.SystemBold; txt.Center = true; txt.Outline = false
-            txt.Visible = true; txt.ZIndex = zb + 4
-            table.insert(GUI.RSDiffElements, txt)
-            table.insert(GUI.RSDiffClickables, { x = sbX, y = yy, w = 22, h = sbH, onClick = onClick })
-        end
-        sbBtn(listY, "^", function()
-            GUI.RSDiffScrollOffset = math.max(0, GUI.RSDiffScrollOffset - maxVisible)
-            BuildRSDiffPanel()
-        end)
-        sbBtn(listY + listH - sbH, "v", function()
-            GUI.RSDiffScrollOffset = math.min(maxOffset, GUI.RSDiffScrollOffset + maxVisible)
-            BuildRSDiffPanel()
-        end)
-
-        local posTxt = Drawing.new("Text")
-        posTxt.Position = Vector2.new(sbX + 11, listY + listH / 2 - 8)
-        posTxt.Text = string.format("%d-%d/%d",
-            GUI.RSDiffScrollOffset + 1,
-            math.min(#results, GUI.RSDiffScrollOffset + maxVisible),
-            #results)
-        posTxt.Color = Colors.TextMuted; posTxt.Size = 10
-        posTxt.Font = Drawing.Fonts.System; posTxt.Center = true
-        posTxt.Outline = false; posTxt.Visible = true; posTxt.ZIndex = zb + 5
-        table.insert(GUI.RSDiffElements, posTxt)
-    end
-end
 
 -- ============================================================
--- ENCHANTS PANEL — scan ReplicatedStorage for enchant-like ModuleScripts.
--- Tries multiple known paths; falls back to keyword scan. Floats above main GUI.
+-- REQUIEM UI — smooth immediate-mode RS Diff panel (ported from Menu.lua.bak)
 -- ============================================================
-
--- AoT Verfall talent rarities (from official Trello)
-local ENCHANT_RARITY_COLORS = {
-    All                = Color3.fromRGB(220, 220, 225),
-    Common             = Color3.fromRGB(180, 180, 190),
-    Uncommon           = Color3.fromRGB(120, 220, 120),
-    Rare               = Color3.fromRGB(80, 160, 255),
-    Epic               = Color3.fromRGB(200, 130, 255),
-    Legendary          = Color3.fromRGB(255, 180, 50),
-    Lore               = Color3.fromRGB(220, 100, 120),
-    Holy               = Color3.fromRGB(255, 240, 180),  -- Faith tier (verified)
-    Unique             = Color3.fromRGB(255, 80, 200),
-    Staff              = Color3.fromRGB(100, 200, 100),
-    Champion           = Color3.fromRGB(255, 80, 80),
-    Wise               = Color3.fromRGB(140, 200, 255),
-    Savior             = Color3.fromRGB(180, 220, 240),
-    Voyager            = Color3.fromRGB(120, 220, 180),
-    Bulwark            = Color3.fromRGB(200, 180, 100),
-    Unknown            = Color3.fromRGB(100, 100, 110),
-}
-local ENCHANT_RARITIES_ORDER = {
-    "Common","Uncommon","Rare","Epic","Legendary","Lore","Holy","Unique","Staff",
-    "Voyager","Bulwark","Champion","Wise","Savior",
-    "Unknown",
+-- Built the way INS-ui gets its smoothness: a per-frame render loop redraws the
+-- whole window from a POOLED object set, and every animated value is eased with
+-- frame-rate-independent exp smoothing  v += (target-v)*(1-exp(-k*dt)). Hover,
+-- the open fade+rise, eased scrolling, drag and resize all run on this. Wrapped
+-- in an IIFE for a fresh 200-local register budget; only the RS data fns
+-- (TakeRSSnapshot / CompareRSSnapshots / save / loadRSSnapshot) reach it as upvalues.
+;(function()
+local floor, expf, minf, maxf = math.floor, math.exp, math.min, math.max
+local C3 = Color3.fromRGB
+local T = {
+    bg=C3(15,15,19), bg2=C3(12,12,16), head=C3(19,19,24), panel=C3(26,25,30),
+    field=C3(36,34,40), soft=C3(50,48,56), text=C3(228,228,234), muted=C3(122,120,130),
+    dim=C3(80,78,88), red=C3(222,68,74), green=C3(82,212,122), yellow=C3(240,202,72), blue=C3(100,176,255),
 }
 
--- Map a folder/template name to a rarity bucket (best-effort).
-local function bucketFromFolderName(folderName)
-    if not folderName then return "Unknown" end
-    local nl = folderName:lower()
-    if nl:find("legendary") then return "Legendary" end
-    if nl:find("epic")      then return "Epic" end
-    if nl:find("mythic")    then return "Mythic" end
-    if nl:find("lore")      then return "Lore" end
-    if nl:find("uncommon")  then return "Uncommon" end
-    if nl:find("rare")      then return "Rare" end
-    if nl:find("common")    then return "Common" end
-    -- Path talents are typically Legendary-tier endgame
-    if nl:find("path")      then return "Legendary" end
-    -- Unique talents map to Mythic
-    if nl:find("unique")    then return "Mythic" end
-    if ENCHANT_RARITY_COLORS[folderName] then return folderName end
-    return "Unknown"
+local R = { dt=1/60, fade=1, yoff=0, opacity=1, mx=0, my=0, down=false, justP=false }
+local function smooth(cur, target, k)
+    if cur == nil then return target end
+    local dt = R.dt; if dt <= 0 then dt = 1/60 end
+    return cur + (target - cur) * (1 - expf(-(k or 15) * dt))
+end
+local anim = {}
+local function av(key, target, k) anim[key] = smooth(anim[key], target, k); return anim[key] end
+local function mixc(a, b, t)
+    return C3(floor((a.R*255+(b.R*255-a.R*255)*t)+0.5), floor((a.G*255+(b.G*255-a.G*255)*t)+0.5), floor((a.B*255+(b.B*255-a.B*255)*t)+0.5))
+end
+local function tw(s, size) return #tostring(s or "")*(size or 13)*0.5 end
+local function trim(s, n) s=tostring(s or ""); if #s<=n then return s end return s:sub(1,maxf(1,n-2)).."." end
+
+local pool = { Square={}, Text={}, Line={}, Circle={} }
+local idx = { Square=0, Text=0, Line=0, Circle=0 }
+local function claim(kind)
+    idx[kind] = idx[kind]+1
+    local p = pool[kind]; local o = p[idx[kind]]
+    if not o then local ok; ok,o = pcall(Drawing.new, kind); if not ok or not o then return nil end; p[idx[kind]]=o end
+    o.Visible = true; return o
+end
+local function beginFrame() idx.Square=0; idx.Text=0; idx.Line=0; idx.Circle=0 end
+local function endFrame() for kind,p in pairs(pool) do for i=idx[kind]+1,#p do pcall(function() p[i].Visible=false end) end end end
+
+-- R.clipTop/R.clipBot define a vertical scissor band (absolute screen Y); list
+-- content clamps/hides outside it so scrolling rows never spill over the header.
+local function rect(x,y,w,h,color,z,alpha,corner,filled,thick)
+    local ay=y+R.yoff
+    if R.clipTop then
+        if ay+h<=R.clipTop or ay>=R.clipBot then return end
+        local ny=maxf(ay,R.clipTop); h=minf(ay+h,R.clipBot)-ny; ay=ny; if h<=0 then return end
+    end
+    local o=claim("Square"); if not o then return end
+    o.Position=Vector2.new(x,ay); o.Size=Vector2.new(maxf(0,w),maxf(0,h)); o.Color=color or T.panel
+    o.Filled=filled~=false; o.Corner=corner or 0; if thick then o.Thickness=thick end
+    o.Transparency=(alpha or 1)*R.fade*R.opacity; o.ZIndex=z or 60; return o
+end
+local function txt(s,x,y,size,color,z,center,font)
+    local ay=y+R.yoff
+    if R.clipTop then local mc=ay+(size or 13)*0.5; if mc<R.clipTop or mc>R.clipBot then return end end
+    local o=claim("Text"); if not o then return end
+    o.Position=Vector2.new(x,ay); o.Text=tostring(s==nil and "" or s); o.Size=size or 13
+    o.Color=color or T.text; o.Center=center==true; o.Outline=false; o.Font=font or Drawing.Fonts.System
+    o.Transparency=R.fade*R.opacity; o.ZIndex=z or 61; return o
+end
+local function ln(x1,y1,x2,y2,color,z,thick,alpha)
+    if R.clipTop then local mc=(y1+y2)*0.5+R.yoff; if mc<R.clipTop or mc>R.clipBot then return end end
+    local o=claim("Line"); if not o then return end
+    o.From=Vector2.new(x1,y1+R.yoff); o.To=Vector2.new(x2,y2+R.yoff); o.Color=color or T.soft
+    o.Thickness=thick or 1; o.Transparency=(alpha or 1)*R.fade*R.opacity; o.ZIndex=z or 61; return o
+end
+local function shadow(x,y,w,h,z) rect(x+9,y+13,w,h,C3(0,0,0),z,0.10,10); rect(x+4,y+6,w,h,C3(0,0,0),z+1,0.08,10) end
+
+local clicks, drags, scrolls, resizes = {}, {}, {}, {}
+local function inside(x,y,w,h) return R.mx>=x and R.mx<=x+w and R.my>=y+R.yoff and R.my<=y+R.yoff+h end
+local function hot(id,x,y,w,h,onClick)
+    local over=inside(x,y,w,h)
+    if onClick then clicks[#clicks+1]={x=x,y=y+R.yoff,w=w,h=h,onClick=onClick} end
+    return av("h:"..id, over and 1 or 0, 16), over
 end
 
--- Climb ancestors looking for a folder name that maps to a rarity bucket.
-local function enchantRarityFromAncestors(inst)
-    local cur = inst.Parent
-    while cur and cur ~= game do
-        local b = bucketFromFolderName(cur.Name)
-        if b ~= "?" then return b end
-        cur = cur.Parent
-    end
-    return "?"
+local function window(key,x,y,w,h,title,subtitle)
+    local z=60
+    shadow(x,y,w,h,z-4)
+    rect(x,y,w,h,T.bg,z,0.95,8)
+    rect(x,y,w,h,C3(255,255,255),z+1,0.12,8,false,1)
+    rect(x,y,w,34,T.head,z+1,0.93,8)
+    rect(x,y+26,w,8,T.head,z+1,0.93,0)
+    ln(x+12,y+34,x+w-12,y+34,T.red,z+2,1,0.5)
+    rect(x+12,y+9,15,15,C3(40,24,28),z+3,0.9,4)
+    ln(x+16,y+13,x+23,y+13,T.red,z+4,1.5,1); ln(x+16,y+17,x+23,y+17,T.red,z+4,1.5,1); ln(x+16,y+21,x+23,y+21,T.red,z+4,1.5,1)
+    txt(title,x+34,y+8,16,T.red,z+4,false,Drawing.Fonts.SystemBold)
+    if subtitle and subtitle~="" then txt(subtitle,x+34+tw(title,16)+12,y+11,12,T.muted,z+4) end
+    -- (no X button — the panel is closed from the Tools-tab toggle; resize grip stays)
+    drags[#drags+1]={x=x,y=y+R.yoff,w=w-20,h=34,key=key}
+    local rhv=hot(key..":rs",x+w-20,y+h-20,18,18)
+    ln(x+w-16,y+h-7,x+w-7,y+h-16,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
+    ln(x+w-12,y+h-7,x+w-7,y+h-12,mixc(T.muted,T.text,rhv*0.5),z+6,1.5,0.7)
+    resizes[#resizes+1]={x=x+w-20,y=y+h-20+R.yoff,w=20,h=20,key=key}
+    return x+14,y+44,w-28
 end
 
--- ============================================================
--- HARDCODED TALENT DATABASE (sourced from official Verfall Trello)
--- This is the authoritative list. PlayerGui is only used to mark "owned".
--- ============================================================
--- Verified from in-game ModuleScript bytecode strings (2026-06)
-local TALENT_DB = {
-    Common = {
-        -- Physical
-        "Runaway", "Builderman", "Bulk Up!", "Cautious", "Dense Bones",
-        "Exhaustion Training", "Handyman", "Hit The Dash!", "Martial Arts Training",
-        "Open Up!", "Reinforced Ribs", "Sadistic", "Scarred Flesh", "Steady Hands",
-        "Unfazed Warrior", "Body and Mind",
-        -- Sword
-        "Basic Swordsmanship", "Feint", "Riposte", "Sturdy Balance",
-        -- Miscellaneous
-        "Flare Expert", "Flare Specialist", "Field Observer",
-        -- Titan
-        "Loud Presence", "Silent Steps", "Tasty Target",
-        -- Horse
-        "Dead Stop", "Tight Reins", "Second Wind",
-        -- Gun
-        "Crackshot", "Dexterous Reload", "Marksman", "Muffled Rounds",
-        "Quick Footed", "Steady Aim", "Steady Focus", "Stunning Shot",
-        "On Alert!", "Ammo Pouch", "Marksman's Patience", "Quick Fingers",
-        "Subtle Shot", "Crippling Shot", "Firearms Awareness",
-        -- ODMGear
-        "Quick Hands", "Sleight Of Hand", "Enhanced Concentration", "ODMG Training",
-    },
-    Rare = {
-        -- Physical
-        "Extra Marrow", "Hardened Frame", "Hyper Awareness", "In The Zone",
-        "Iron Skin", "Lethal Pursuer", "On The Go", "Precise Strike",
-        "Quick Step", "Strongman",
-        -- Explosive
-        "Firebug", "Pyromaniac", "Raze",
-        -- Horse
-        "Full Speed Ahead", "Man's Best Friend", "No Breaks",
-        -- Titan
-        "Hard Headed",
-        -- ODMGear
-        "Get Me Out!", "Hook Momentum", "Quick Supply",
-        -- Gun
-        "Snarefire", "Enhanced Aim", "Suppressing Fire",
-    },
-    Legendary = {
-        -- Physical
-        "Enduring Spirit", "Flash Step", "Skull Plating", "Unbreakable",
-        -- Titan
-        "Spoiled Meat", "Obvious", "Titan Slayer",
-        -- ODMGear
-        "Butcher", "Finishing Touch", "Humanity's Strongest Weapon",
-        "Muscle Memory", "Perpetual Motion", "Total Concentration", "Velocity Awareness",
-        -- Gun
-        "Legbreaker", "Pyromanic",
-        -- Note: Swordmaster moved to Lore (it's a Lore talent per Lore module bytecode)
-    },
-    Lore = {
-        -- All Lore talents from Lore module bytecode
-        "Anti-Personnel Gear Training", "Basic Firearms Training", "Basic Swordsmanship",
-        "Expert Swordsmanship", "Explosives Training", "Firearms Proficiency",
-        "Freerunner", "Gunslinger", "Humanity", "Ice Strider",
-        "Intermediate Swordsmanship", "Keep It Pushing", "ODMG Training",
-        "Prototype Training", "Pyromania", "Surpassing Limits", "Swordmaster",
-        "The 45th Class", "The Tundra", "Top Cadet", "Viewfinder",
-        "Advanced Movement Tactics", "Weak Point Detection",
-        "Winter's Blessing", "Wolf Pelt",
-    },
-    -- HOLY = confirmed real rarity (Faith talents)
-    Holy = {
-        "Devotion to Faith", "God's Loving Embrace", "God's Judgement",
-    },
-    -- Unique = the Strongest path talents
-    Unique = {
-        "Humanity's Strongest", "Liberation",
-    },
-    -- Staff (Utility) talents
-    Staff = {
-        "Capacity Understanding",
-    },
-    -- Path talents (verified from PathTalents/* bytecode 2026-06)
-    Voyager  = {
-        "Path of The Voyager", "Adventurer", "Conserver",
-    },
-    Bulwark  = {
-        "Path of The Bulwark", "Iron Will", "Stand My Ground",
-        "Unyielding", "Wall of Strength", "Weakened Target",
-    },
-    Champion = {
-        "Path of The Champion", "Executioner", "Finisher's Right",
-        "Fueled By Blood", "Marked Prey",
-    },
-    Savior   = {
-        "Path of The Savior", "Bandage Removal", "Blood Bag", "Empathetic",
-        "Field Medic", "Lifeblood", "Peacemaker", "Repetition Training",
-        "Seasoned Hands", "Stock Up!",
-    },
-    Wise     = {
-        "Path of The Wise", "Gas Awareness", "Inertia", "Logistics",
-        "Mathematician", "Overclock", "Precise Swing",
-    },
-}
-
--- Descriptions extracted from module bytecode where available
-local TALENT_DESC = {
-    ["Body and Mind"]              = "Slightly increase base running speed.",
-    ["Cautious"]                   = "Check your health faster when under 60% health.",
-    ["Dense Bones"]                = "Take 2% reduced damage from bladed weapons.",
-    ["In The Zone"]                = "Perfectly timed critical builds grant a larger boost to progression.",
-    ["Iron Skin"]                  = "Take 4% reduced damage from bladed weapons.",
-    ["Unbreakable"]                = "Take 6% reduced damage from bladed weapons.",
-    ["Open Up!"]                   = "When kicking down a door, gain brief invincibility frames.",
-    ["On The Go"]                  = "Checking your health no longer stops you in place.",
-    ["Precise Strike"]             = "Critical attacks deal 25% more damage.",
-    ["Quick Step"]                 = "While on the ground, with a melee out, press [Q] to perform a roll.",
-    ["Flash Step"]                 = "While rolling, gain brief iFrames.",
-    ["Steady Hands"]               = "Increases the timing window for critical builds.",
-    ["Builderman"]                 = "Slightly increase your build speed.",
-    ["Unfazed Warrior"]            = "When your health is low, the walkspeed debuff is lessened.",
-    ["Devotion to Faith"]          = "Your devotion to God is commendable, gain immense luck.",
-    ["Adventurer"]                 = "Gain a slight velocity buff in any map outside the walls.",
-    ["Hook Momentum"]              = "Gain even more speed when hooking in a downwards direction.",
-    ["Enhanced Concentration"]     = "Slightly decrease screen shake.",
-    ["Flare Specialist"]           = "Your flares now last longer and travel further.",
-    ["Stunning Shot"]              = "Landing a shot on a target will cancel their sprint for 2 seconds.",
-    ["Firebug"]                    = "Deal slightly more damage with explosives.",
-    ["Pyromaniac"]                 = "Deal much more damage with explosives.",
-    ["Raze"]                       = "Deal increased explosive damage to titans.",
-    -- Savior path
-    ["Blood Bag"]                  = "Healing an ally grants you healing equivalent to 5% of the total amount healed.",
-    ["Field Medic"]                = "After healing an ally, gain increased velocity and conservation.",
-    ["Lifeblood"]                  = "Healing an ally adds 5% to your regen cap for 30 seconds, can be stacked twice.",
-    ["Peacemaker"]                 = "Lose 25% of your blade damage, in return gain 20% extra healing.",
-    ["Repetition Training"]        = "Reduce removal timer by 35%.",
-    ["Stock Up!"]                  = "Carry an additional 3 bandages.",
-    ["Seasoned Hands"]             = "Gain increased bandage speed.",
-    ["Bandage Removal"]            = "Remove bandages from yourself or an ally. Recharges one use for every three bandages you apply.",
-    -- Wise path
-    ["Gas Awareness"]              = "When reaching keypoints in your gas capacity, be automatically notified.",
-    ["Inertia"]                    = "Gain a velocity boost after an attack exceeding 500 damage.",
-    ["Overclock"]                  = "Gain a velocity and conservation boost after checking your gas. [Cooldown of 180 seconds.]",
-    ["Precise Swing"]              = "You have a chance to lose less blade durability after landing a hit.",
-    ["Riposte"]                    = "Gain a slight damage increase after a successful parry with a sword.",
-    ["Sturdy Balance"]             = "Recover from being parried slightly faster.",
-    ["Feint"]                      = "While swinging your melee, press [M2] to cancel your swing early.",
-    ["Flare Expert"]               = "Load and unload your flare gun at 2x speed.",
-    ["Flare Specialist"]           = "Your flares now last longer and travel further.",
-    ["Quick Hands"]                = "You are able to check your gas faster.",
-    ["Sleight Of Hand"]            = "You take out your ODMG handles quicker.",
-    ["Total Concentration"]        = "Completely remove screen shake and field of view changes.",
-    ["Velocity Awareness"]         = "Visualize your current velocity.",
-    ["Muscle Memory"]              = "After breaking your blades, quickly pull out another set.",
-    ["Quick Supply"]               = "You refill your supplies at a much quicker pace.",
-    ["Butcher"]                    = "Deal more limb damage to titans.",
-    ["Finishing Touch"]            = "Deal more nape damage to titans with missing limbs.",
-    ["ODMG Training"]              = "Humanity's Strongest Weapon is now within your hands.",
-    ["Spoiled Meat"]               = "You are now heavily prioritized by titans.",
-    ["Tasty Target"]               = "You're now detected more easily by titans.",
-    ["Crackshot"]                  = "Gain increased reload speed after hitting a shot.",
-    ["Dexterous Reload"]           = "Negate the walkspeed debuff from reloading.",
-    ["Muffled Rounds"]             = "The smoke and sound after firing a shot are reduced.",
-    ["Quick Footed"]               = "Allows you to sprint faster while aiming.",
-    ["Steady Aim"]                 = "Standing still will nullify bullet spread.",
-    ["Steady Focus"]               = "Recoil and blur from shooting is reduced.",
-    ["On Alert!"]                  = "Ready and aim firearms slightly faster.",
-    ["Legbreaker"]                 = "Landing a shot will half the target's max velocity for 10 seconds.",
-    ["Pyromania"]                  = "You understand how to use and operate a boomstick.",
-    ["Raze"]                       = "Deal increased explosive damage to titans.",
-    ["The Tundra"]                 = "You're a few steps ahead of the rest — see further within the fog.",
-    ["Conserver"]                  = "Gain a slight conservation buff in any map outside the walls.",
-    ["Iron Will"]                  = "Stand strong, your ragdoll timer is 30% less.",
-    ["Stand My Ground"]            = "With a cooldown, if damaged when ragdolled instantly get up.",
-    ["Unyielding"]                 = "When below 50%, take reduced damage from all sources.",
-    ["Wall of Strength"]           = "While standing still gain damage reduction.",
-    ["Executioner"]                = "Deal more damage to a human enemy if they are below 25%.",
-    ["Fueled By Blood"]            = "With every successful slash, heal 10% against human targets.",
-    ["Liberation"]                 = "Cut down everything in your path, cleave your way towards freedom.",
-    ["God's Loving Embrace"]       = "Within God's arms, we are protected.",
-    ["Capacity Understanding"]     = "When checking your gas, know your exact amount.",
-    ["Path of The Wise"]           = "Numbers, patterns, statistics. These are the keys to your victory.",
-}
-
--- Build name→rarity lookup
-local TALENT_RARITY_BY_NAME = {}
-for rarity, list in pairs(TALENT_DB) do
-    for _, name in ipairs(list) do
-        TALENT_RARITY_BY_NAME[name:lower()] = rarity
-    end
+local function card(x,y,w,h,z,active,accent,hov)
+    accent=accent or T.red
+    shadow(x,y,w,h,z-1)
+    rect(x,y,w,h,mixc(active and C3(40,27,31) or T.panel, T.soft, (hov or 0)*0.35),z,active and 0.9 or 0.78,6)
+    rect(x,y,w,h,active and accent or mixc(T.soft,accent,(hov or 0)*0.6),z+1,active and 0.7 or (0.28+(hov or 0)*0.4),6,false,1)
 end
 
--- Walk roots and collect every ModuleScript under them.
-FetchEnchants = function()
-    local data = {}
-    local seen = {}  -- de-dup by name (lowercase)
-
-    -- 1. Populate from hardcoded database (source of truth)
-    for rarity, list in pairs(TALENT_DB) do
-        for _, talentName in ipairs(list) do
-            local key = talentName:lower()
-            if not seen[key] then
-                seen[key] = true
-                table.insert(data, {
-                    name = talentName,
-                    rarity = rarity,
-                    path = "[TalentDB] " .. rarity,
-                    owned = false,
-                })
-            end
-        end
-    end
-
-    -- 2. Mark owned by scanning PlayerGui (requires profile menu OPEN)
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if pg then
-        local mm = pg:FindFirstChild("MainMenu")
-        if mm then
-            local scrollPath = "MenuFrame.Frames.Profile.Profile.Talents.ScrollingFrame"
-            local node = mm
-            for part in scrollPath:gmatch("[^%.]+") do
-                if not node then break end
-                node = node:FindFirstChild(part)
-            end
-            if node then
-                for _, child in ipairs(node:GetChildren()) do
-                    if child:IsA("GuiObject") and child.Name ~= "TalentTemplate" then
-                        local key = child.Name:lower()
-                        -- If owned but not in our DB, add it with Unknown rarity
-                        local found = false
-                        for _, entry in ipairs(data) do
-                            if entry.name:lower() == key then
-                                entry.owned = true
-                                found = true
-                                break
-                            end
-                        end
-                        if not found then
-                            seen[key] = true
-                            table.insert(data, {
-                                name = child.Name,
-                                rarity = "Unknown",
-                                path = child:GetFullName(),
-                                owned = true,
-                            })
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Sort: rarity-bucket order, owned first within bucket, then alpha
-    local order = {}
-    for i, k in ipairs(ENCHANT_RARITIES_ORDER) do order[k] = i end
-    table.sort(data, function(a, b)
-        local ra = order[a.rarity] or 99
-        local rb = order[b.rarity] or 99
-        if ra ~= rb then return ra < rb end
-        if a.owned ~= b.owned then return a.owned end
-        return a.name < b.name
-    end)
-
-    local ownedCount = 0
-    for _, e in ipairs(data) do if e.owned then ownedCount = ownedCount + 1 end end
-    GUI.EnchantsData   = data
-    GUI.EnchantsStatus = string.format("%d total, %d owned", #data, ownedCount)
-    print(string.format("[Enchants] %d entries (%d owned)", #data, ownedCount))
-    do return end
-
-    -- (Legacy code below — never reached, kept for reference)
-    local rs = game:GetService("ReplicatedStorage")
-
-    -- ReplicatedStorage roots. Walk EACH that exists.
-    local rootPathStrs = {
-        "Client.Progression.Enchantments.Enchantments",
-        "Enchantments",
-        "ReplicatedAssets.AllTalents",
-        "ReplicatedAssets.AllTalents.TalentLibrary",
-        "ReplicatedAssets.AllTalents.TalentLibrary.BaseTalents",
-        "ReplicatedAssets.AllTalents.TalentLibrary.PathTalents",
-        "ReplicatedAssets.AllTalents.TalentLibrary.UniqueTalents",
-        "ReplicatedAssets.AllTalents.TalentLibrary.StaffTalents",
-        "ReplicatedAssets.AllTalents.TraitLibrary",
-        "ReplicatedAssets.AllTalents.SkillLibrary",
-        "ReplicatedAssets.Library.Talents",
-    }
-
-    local function resolvePath(pathStr)
-        local node = rs
-        for part in pathStr:gmatch("[^%.]+") do
-            if not node then return nil end
-            local ok, child = pcall(function() return node:FindFirstChild(part) end)
-            if not ok then return nil end
-            node = child
-        end
-        return node
-    end
-
-    local rootsWalked = 0
-    for _, p in ipairs(rootPathStrs) do
-        local r = resolvePath(p)
-        if r then
-            rootsWalked = rootsWalked + 1
-            for _, d in ipairs(r:GetDescendants()) do
-                if d:IsA("ModuleScript") then
-                    local full = d:GetFullName()
-                    if not seen[full] then
-                        seen[full] = true
-                        table.insert(data, {
-                            name = d.Name,
-                            rarity = enchantRarityFromAncestors(d),
-                            path = full,
-                        })
-                    end
-                end
-            end
-        end
-    end
-
-    -- AoT Ugc: PlayerGui owned-talents list. Frame children of the Talents
-    -- ScrollingFrame are named after each owned talent (e.g. "The 45th Class",
-    -- "Path of The Savior"). Skip Traits/Burns/Skills — those aren't talents.
-    -- Try to infer rarity from the Frame's template attribute or ancestor card type.
-    local function inferTalentRarity(frame)
-        -- 1. Direct attribute
-        local rarAttr
-        pcall(function() rarAttr = frame:GetAttribute("Rarity") end)
-        if rarAttr and ENCHANT_RARITY_COLORS[rarAttr] then return rarAttr end
-        -- 2. Look for a *Card descendant template (BaseCard/RareCard/etc.)
-        for _, c in ipairs(frame:GetDescendants()) do
-            local cn = c.Name
-            if cn:find("Card") then
-                local b = bucketFromFolderName(cn)
-                if b ~= "Unknown" then return b end
-            end
-        end
-        -- 3. Frame name keyword
-        return bucketFromFolderName(frame.Name)
-    end
-
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if pg then
-        local scrollPath = "MainMenu.MenuFrame.Frames.Profile.Profile.Talents.ScrollingFrame"
-        local node = pg
-        for part in scrollPath:gmatch("[^%.]+") do
-            if not node then break end
-            node = node:FindFirstChild(part)
-        end
-        if node then
-            for _, child in ipairs(node:GetChildren()) do
-                -- Skip generic templates / non-talent UI helpers
-                if child.Name ~= "TalentTemplate" and child.Name ~= "ItemTemplate"
-                   and child:IsA("GuiObject") then
-                    local full = child:GetFullName()
-                    if not seen[full] then
-                        seen[full] = true
-                        table.insert(data, {
-                            name   = child.Name,
-                            rarity = inferTalentRarity(child),
-                            path   = full,
-                            owned  = true,
-                        })
-                    end
-                end
-            end
-        end
-    end
-
-    -- Final fallback: keyword scan if NOTHING found
-    if #data == 0 then
-        for _, d in ipairs(rs:GetDescendants()) do
-            if d:IsA("ModuleScript") then
-                local n = d.Name:lower()
-                if n:find("enchant") or n:find("talent") or n:find("trait") then
-                    local full = d:GetFullName()
-                    if not seen[full] then
-                        seen[full] = true
-                        table.insert(data, {
-                            name = d.Name,
-                            rarity = enchantRarityFromAncestors(d),
-                            path = full,
-                        })
-                    end
-                end
-            end
-        end
-    end
-
-    -- Sort: rarity-bucket order, then alpha
-    local order = {}
-    for i, k in ipairs(ENCHANT_RARITIES_ORDER) do order[k] = i end
-    table.sort(data, function(a, b)
-        local ra = order[a.rarity] or 99
-        local rb = order[b.rarity] or 99
-        if ra ~= rb then return ra < rb end
-        return a.name < b.name
-    end)
-
-    GUI.EnchantsData   = data
-    GUI.EnchantsStatus = string.format("%d entries (%d roots)", #data, rootsWalked)
-    print(string.format("[Enchants] %d entries from %d roots", #data, rootsWalked))
-end
-
--- Filtered view based on rarity sub-tab. "All" hides Unknown entries.
-local function buildFilteredEnchantList()
-    local all = GUI.EnchantsData or {}
-    local filter = GUI.EnchantsRarityFilter
-    local out = {}
-    for _, e in ipairs(all) do
-        if filter == "All" then
-            if e.rarity ~= "Unknown" then table.insert(out, e) end
-        elseif e.rarity == filter then
-            table.insert(out, e)
-        end
-    end
-    return out
-end
-
--- Which rarity buckets are actually present in current data (for sub-tabs).
--- Skip "Unknown" — clutter.
-local function presentRarities()
-    local present = {}
-    local list = { "All" }
-    if GUI.EnchantsData then
-        for _, e in ipairs(GUI.EnchantsData) do
-            if e.rarity ~= "Unknown" then
-                present[e.rarity] = true
-            end
-        end
-    end
-    for _, r in ipairs(ENCHANT_RARITIES_ORDER) do
-        if r ~= "Unknown" and present[r] then table.insert(list, r) end
-    end
-    return list
-end
-
-ClearEnchantsPanel = function()
-    for _, el in ipairs(GUI.EnchantsElements) do pcall(function() el:Remove() end) end
-    GUI.EnchantsElements   = {}
-    GUI.EnchantsClickables = {}
-end
-
-BuildEnchantsPanel = function()
-    ClearEnchantsPanel()
-    if not GUI.EnchantsOpen then return end
-
-    local zb = 60
-    local px, py = GUI.EnchantsX, GUI.EnchantsY
-    local pw, ph = GUI.EnchantsW, GUI.EnchantsH
-    local headerH = 34
-    local tabH = 28
-
-    -- Panel bg + border
-    local bg = Drawing.new("Square")
-    bg.Position = Vector2.new(px, py); bg.Size = Vector2.new(pw, ph)
-    bg.Color = Color3.fromRGB(16, 16, 20); bg.Filled = true
-    bg.Corner = 6; bg.Transparency = 0.95
-    bg.Visible = true; bg.ZIndex = zb
-    table.insert(GUI.EnchantsElements, bg)
-    local brd = Drawing.new("Square")
-    brd.Position = Vector2.new(px, py); brd.Size = Vector2.new(pw, ph)
-    brd.Color = Color3.fromRGB(50, 50, 56); brd.Filled = false
-    brd.Corner = 6; brd.Thickness = 1
-    brd.Visible = true; brd.ZIndex = zb + 1
-    table.insert(GUI.EnchantsElements, brd)
-
-    -- Title bar
-    local titleBg = Drawing.new("Square")
-    titleBg.Position = Vector2.new(px, py); titleBg.Size = Vector2.new(pw, headerH)
-    titleBg.Color = Color3.fromRGB(24, 24, 28); titleBg.Filled = true
-    titleBg.Corner = 6; titleBg.Visible = true; titleBg.ZIndex = zb + 1
-    table.insert(GUI.EnchantsElements, titleBg)
-    local titleFill = Drawing.new("Square")
-    titleFill.Position = Vector2.new(px, py + headerH - 6); titleFill.Size = Vector2.new(pw, 6)
-    titleFill.Color = Color3.fromRGB(24, 24, 28); titleFill.Filled = true
-    titleFill.Visible = true; titleFill.ZIndex = zb + 1
-    table.insert(GUI.EnchantsElements, titleFill)
-    local titleText = Drawing.new("Text")
-    titleText.Position = Vector2.new(px + 14, py + 8); titleText.Text = "Enchants"
-    titleText.Color = Colors.AccentRed; titleText.Size = 17
-    titleText.Font = Drawing.Fonts.SystemBold; titleText.Center = false
-    titleText.Outline = false; titleText.Visible = true; titleText.ZIndex = zb + 3
-    table.insert(GUI.EnchantsElements, titleText)
-
-    -- Status next to title
-    local statusStr = GUI.EnchantsStatus
-    if statusStr == "" then statusStr = "Loading..." end
-    local status = Drawing.new("Text")
-    status.Position = Vector2.new(px + 110, py + 10); status.Text = statusStr
-    status.Color = Colors.TextMuted; status.Size = 13
-    status.Font = Drawing.Fonts.System; status.Center = false
-    status.Outline = false; status.Visible = true; status.ZIndex = zb + 3
-    table.insert(GUI.EnchantsElements, status)
-
-    -- Refresh
-    local refreshX = px + pw - 92
-    local refreshY = py + 6
-    local refreshBg = Drawing.new("Square")
-    refreshBg.Position = Vector2.new(refreshX, refreshY); refreshBg.Size = Vector2.new(56, 22)
-    refreshBg.Color = Color3.fromRGB(40, 60, 90); refreshBg.Filled = true; refreshBg.Corner = 4
-    refreshBg.Visible = true; refreshBg.ZIndex = zb + 3
-    table.insert(GUI.EnchantsElements, refreshBg)
-    local refreshTxt = Drawing.new("Text")
-    refreshTxt.Position = Vector2.new(refreshX + 28, refreshY + 4); refreshTxt.Text = "Refresh"
-    refreshTxt.Color = Colors.TextPrimary; refreshTxt.Size = 12
-    refreshTxt.Font = Drawing.Fonts.SystemBold; refreshTxt.Center = true
-    refreshTxt.Outline = false; refreshTxt.Visible = true; refreshTxt.ZIndex = zb + 4
-    table.insert(GUI.EnchantsElements, refreshTxt)
-    table.insert(GUI.EnchantsClickables, {
-        x = refreshX, y = refreshY, w = 56, h = 22,
-        onClick = function()
-            task.spawn(function()
-                GUI.EnchantsStatus = "Scanning..."
-                BuildEnchantsPanel()
-                FetchEnchants()
-                if GUI.EnchantsOpen then BuildEnchantsPanel() end
-            end)
-        end,
-    })
-
-    -- Close X
-    local closeX = px + pw - 28
-    local closeY = py + 6
-    local closeText = Drawing.new("Text")
-    closeText.Position = Vector2.new(closeX + 6, closeY + 2); closeText.Text = "X"
-    closeText.Color = Colors.AccentRed; closeText.Size = 17
-    closeText.Font = Drawing.Fonts.SystemBold; closeText.Center = false
-    closeText.Outline = false; closeText.Visible = true; closeText.ZIndex = zb + 3
-    table.insert(GUI.EnchantsElements, closeText)
-    table.insert(GUI.EnchantsClickables, {
-        x = closeX, y = closeY, w = 24, h = 24,
-        onClick = function()
-            GUI.EnchantsOpen = false
-            Tools.ShowEnchants = false
-            GUI.EnchantsModal = nil
-            ClearEnchantsPanel()
-            if GUI.SelectedPage == "Tools" then CreateContent("Tools") end
-        end,
-    })
-
-    -- Rarity sub-tab bar — auto-shrinks text + wraps to 2 rows if too crowded.
-    local tabBarY = py + headerH
-    local tabs = presentRarities()
-    local tabsPerRow = #tabs > 10 and math.ceil(#tabs / 2) or #tabs
-    local numRows = math.ceil(#tabs / tabsPerRow)
-    local tabW = math.floor(pw / math.max(1, tabsPerRow))
-    local rowH = tabH
-    -- Adjust panel layout to account for extra row
-    if numRows > 1 then
-        tabBarY = py + headerH
-    end
-
-    for i, name in ipairs(tabs) do
-        local row = math.floor((i - 1) / tabsPerRow)
-        local col = (i - 1) % tabsPerRow
-        local tx = px + col * tabW
-        local ty = tabBarY + row * rowH
-        local isSel = GUI.EnchantsRarityFilter == name
-        local color = ENCHANT_RARITY_COLORS[name] or Colors.TextPrimary
-
-        local label = Drawing.new("Text")
-        label.Position = Vector2.new(tx + tabW / 2, ty + 7); label.Text = name
-        label.Color = isSel and color or Colors.TextMuted
-        label.Size = 12
-        label.Font = isSel and Drawing.Fonts.SystemBold or Drawing.Fonts.System
-        label.Center = true; label.Outline = false
-        label.Visible = true; label.ZIndex = zb + 3
-        table.insert(GUI.EnchantsElements, label)
-
-        if isSel then
-            local underline = Drawing.new("Line")
-            underline.From = Vector2.new(tx + 6, ty + rowH - 2)
-            underline.To   = Vector2.new(tx + tabW - 6, ty + rowH - 2)
-            underline.Color = color; underline.Thickness = 2
-            underline.Visible = true; underline.ZIndex = zb + 3
-            table.insert(GUI.EnchantsElements, underline)
-        end
-
-        local capName = name
-        table.insert(GUI.EnchantsClickables, {
-            x = tx, y = ty, w = tabW, h = rowH,
-            onClick = function()
-                GUI.EnchantsRarityFilter = capName
-                GUI.EnchantsScrollOffset = 0
-                BuildEnchantsPanel()
-            end,
-        })
-    end
-    -- Account for extra tab row in layout calculations below
-    local tabBarTotalH = numRows * rowH
-
-    -- Separator under tabs
-    local sepY = tabBarY + tabH
-    local sep = Drawing.new("Line")
-    sep.From = Vector2.new(px + 4, sepY); sep.To = Vector2.new(px + pw - 4, sepY)
-    sep.Color = Color3.fromRGB(40, 40, 46); sep.Thickness = 1
-    sep.Visible = true; sep.ZIndex = zb + 2
-    table.insert(GUI.EnchantsElements, sep)
-
-    -- Card grid area
-    local gridX = px + 16
-    local gridY = sepY + 8
-    local gridW = pw - 32 - 30  -- right margin for scrollbar
-    local gridH = ph - (gridY - py) - 12
-    local cardW = 138
-    local cardH = 110
-    local colGap = 8
-    local rowGap = 10
-    local cols = math.max(1, math.floor((gridW + colGap) / (cardW + colGap)))
-    cardW = math.floor((gridW - colGap * (cols - 1)) / cols)
-
-    local list = buildFilteredEnchantList()
-    local totalRows = math.ceil(#list / cols)
-    local visibleRows = math.max(1, math.floor((gridH + rowGap) / (cardH + rowGap)))
-    local maxScroll = math.max(0, totalRows - visibleRows)
-    if GUI.EnchantsScrollOffset > maxScroll then GUI.EnchantsScrollOffset = maxScroll end
-    if GUI.EnchantsScrollOffset < 0 then GUI.EnchantsScrollOffset = 0 end
-
-    if #list == 0 then
-        local empty = Drawing.new("Text")
-        empty.Position = Vector2.new(px + pw / 2, gridY + gridH / 2 - 8)
-        empty.Text = GUI.EnchantsData and "No entries match this filter" or "Scanning..."
-        empty.Color = Colors.TextMuted; empty.Size = 14
-        empty.Font = Drawing.Fonts.System; empty.Center = true
-        empty.Outline = false; empty.Visible = true; empty.ZIndex = zb + 3
-        table.insert(GUI.EnchantsElements, empty)
+local function button(id,x,y,w,h,label,onClick,primary,accent,z)
+    accent=accent or T.red; z=z or 62
+    local hv=hot(id,x,y,w,h,onClick)
+    if primary then
+        rect(x,y,w,h,mixc(accent,C3(255,255,255),hv*0.12),z,0.94,5)
+        txt(label,x+w/2,y+(h-14)/1.35,13,C3(18,18,22),z+2,true,Drawing.Fonts.SystemBold)
     else
-        local startRow = GUI.EnchantsScrollOffset
-        local endRow = math.min(totalRows - 1, startRow + visibleRows - 1)
-        for row = startRow, endRow do
-            for col = 0, cols - 1 do
-                local idx = row * cols + col + 1
-                local item = list[idx]
-                if item then
-                    local cx = gridX + col * (cardW + colGap)
-                    local cy = gridY + (row - startRow) * (cardH + rowGap)
-                    local rcol = ENCHANT_RARITY_COLORS[item.rarity] or Colors.TextPrimary
+        rect(x,y,w,h,mixc(C3(32,30,36),C3(48,46,54),hv*0.5),z,0.82,5)
+        rect(x,y,w,h,accent,z+1,0.4+hv*0.4,5,false,1)
+        txt(label,x+w/2,y+(h-13)/1.35,13,mixc(accent,T.text,hv*0.2),z+2,true,Drawing.Fonts.SystemBold)
+    end
+end
 
-                    -- Card bg
-                    local cardBg = Drawing.new("Square")
-                    cardBg.Position = Vector2.new(cx, cy); cardBg.Size = Vector2.new(cardW, cardH)
-                    cardBg.Color = Color3.fromRGB(22, 22, 26); cardBg.Filled = true
-                    cardBg.Corner = 5; cardBg.Visible = true; cardBg.ZIndex = zb + 2
-                    table.insert(GUI.EnchantsElements, cardBg)
-                    local cardBrd = Drawing.new("Square")
-                    cardBrd.Position = Vector2.new(cx, cy); cardBrd.Size = Vector2.new(cardW, cardH)
-                    cardBrd.Color = Color3.fromRGB(40, 40, 46); cardBrd.Filled = false
-                    cardBrd.Corner = 5; cardBrd.Thickness = 1
-                    cardBrd.Visible = true; cardBrd.ZIndex = zb + 3
-                    table.insert(GUI.EnchantsElements, cardBrd)
+local function scrollbar(key,offKey,x,y,h,maxScroll,viewH,contentH)
+    local z=64
+    GUI[offKey]=maxf(0,minf(GUI[offKey] or 0,maxScroll))
+    local disp=av("s:"..key, GUI[offKey], 16)
+    if maxScroll>0 then
+        rect(x,y,5,h,T.bg2,z,0.5,3)
+        local thumbH=maxf(28,h*(viewH/maxf(1,contentH)))
+        local ty=y+(h-thumbH)*(disp/maxScroll)
+        local hv=hot("sb:"..key,x-3,ty,11,thumbH)
+        rect(x,ty,5,thumbH,mixc(T.soft,T.text,hv*0.3),z+1,0.85,3)
+        scrolls[#scrolls+1]={x=x-3,y=ty+R.yoff,w=11,h=thumbH,key=offKey,track=h-thumbH,maxScroll=maxScroll}
+    end
+    return disp
+end
 
-                    -- Rarity strip across bottom
-                    local stripH = 4
-                    local strip = Drawing.new("Square")
-                    strip.Position = Vector2.new(cx + 1, cy + cardH - stripH - 1)
-                    strip.Size = Vector2.new(cardW - 2, stripH)
-                    strip.Color = rcol; strip.Filled = true
-                    strip.Visible = true; strip.ZIndex = zb + 4
-                    table.insert(GUI.EnchantsElements, strip)
-
-                    -- Teardrop icon (two filled circles)
-                    local orbCx = cx + cardW / 2
-                    local orbCy = cy + 50
-                    local body = Drawing.new("Circle")
-                    body.Position = Vector2.new(orbCx, orbCy + 6); body.Radius = 11
-                    body.NumSides = 24; body.Color = rcol
-                    body.Filled = true; body.Transparency = 0.85
-                    body.Visible = true; body.ZIndex = zb + 4
-                    table.insert(GUI.EnchantsElements, body)
-                    local tip = Drawing.new("Circle")
-                    tip.Position = Vector2.new(orbCx, orbCy - 6); tip.Radius = 6
-                    tip.NumSides = 18; tip.Color = rcol
-                    tip.Filled = true; tip.Transparency = 0.85
-                    tip.Visible = true; tip.ZIndex = zb + 4
-                    table.insert(GUI.EnchantsElements, tip)
-
-                    -- Name (bottom)
-                    local nameLabel = Drawing.new("Text")
-                    nameLabel.Position = Vector2.new(cx + cardW / 2, cy + cardH - 22)
-                    nameLabel.Text = item.name
-                    nameLabel.Color = Colors.TextPrimary; nameLabel.Size = 12
-                    nameLabel.Font = Drawing.Fonts.SystemBold
-                    nameLabel.Center = true; nameLabel.Outline = false
-                    nameLabel.Visible = true; nameLabel.ZIndex = zb + 5
-                    table.insert(GUI.EnchantsElements, nameLabel)
-
-                    -- Rarity tag top-left
-                    local rTag = Drawing.new("Text")
-                    rTag.Position = Vector2.new(cx + 8, cy + 6); rTag.Text = item.rarity
-                    rTag.Color = rcol; rTag.Size = 10
-                    rTag.Font = Drawing.Fonts.System; rTag.Center = false
-                    rTag.Outline = false; rTag.Visible = true; rTag.ZIndex = zb + 5
-                    table.insert(GUI.EnchantsElements, rTag)
-
-                    -- Click → open modal with path detail
-                    local capItem = item
-                    table.insert(GUI.EnchantsClickables, {
-                        x = cx, y = cy, w = cardW, h = cardH,
-                        onClick = function()
-                            GUI.EnchantsModal = {
-                                name = capItem.name, rarity = capItem.rarity, path = capItem.path,
-                            }
-                            BuildEnchantsPanel()
-                        end,
-                    })
-                end
-            end
+local function drawRS()
+    if not GUI.RSDiffOpen then anim.rsopen=0; return end
+    local op=av("rsopen",1,14); R.fade=op; R.yoff=(1-op)*12
+    local x,y,w,h=GUI.RSDiffX,GUI.RSDiffY,GUI.RSDiffW,GUI.RSDiffH
+    local _cx,cy,cw=window("rs",x,y,w,h,"ReplicatedStorage Diff",(GUI.RSSnapshot and ((GUI.RSSnapshotCount or 0).." paths") or "no snapshot"))
+    local bw=(cw-30)/4
+    button("rssnap",x+14,cy,bw,30,GUI.RSSnapshot and "Overwrite" or "Snapshot",function()
+        GUI.RSDiffStatus="Snapshotting..."; task.spawn(function()
+            local snap,count=TakeRSSnapshot(); GUI.RSSnapshot=snap; GUI.RSSnapshotCount=count
+            local okT,t=pcall(os.time); GUI.RSSnapshotAt=okT and t or nil; GUI.RSDiffResults=nil; GUI.RSDiffScrollOffset=0
+            local ok=saveRSSnapshot(); GUI.RSDiffStatus=ok and ("Saved "..count.." paths.") or ("Captured "..count.." (save failed)")
+        end)
+    end,false,T.muted)
+    button("rscmp",x+14+(bw+10),cy,bw,30,"Compare",function()
+        if not GUI.RSSnapshot then GUI.RSDiffStatus="No snapshot yet."; return end
+        GUI.RSDiffStatus="Comparing..."; task.spawn(function()
+            local cur=TakeRSSnapshot(); GUI.RSDiffResults=CompareRSSnapshots(GUI.RSSnapshot,cur); GUI.RSDiffScrollOffset=0; GUI.RSDiffStatus=#GUI.RSDiffResults.." changes." end)
+    end,false,T.blue)
+    button("rsload",x+14+2*(bw+10),cy,bw,30,"Load Saved",function()
+        GUI.RSDiffStatus="Loading..."; task.spawn(function() loadRSSnapshot(); GUI.RSDiffStatus=GUI.RSSnapshot and ("Loaded "..(GUI.RSSnapshotCount or 0).." paths.") or "Load failed." end)
+    end,false,T.green)
+    button("rsclr",x+14+3*(bw+10),cy,bw,30,"Clear",function() GUI.RSDiffResults=nil; GUI.RSDiffStatus=""; GUI.RSDiffScrollOffset=0 end,false,T.red)
+    txt((GUI.RSDiffStatus~="" and GUI.RSDiffStatus or "Snapshot or Load Saved, then Compare."),x+14,cy+40,13,T.muted,63)
+    local res=GUI.RSDiffResults or {}; local listY=cy+64; local listH=(y+h-14)-listY; local rowH=24
+    local maxS=maxf(0,#res*rowH-listH)
+    card(x+14,listY,cw,listH,61,false)
+    local off=scrollbar("rs","RSDiffScrollOffset",x+14+cw-6,listY,listH,maxS,listH,#res*rowH)
+    R.clipTop=listY-1; R.clipBot=y+h-12
+    for i,rr in ipairs(res) do
+        local rY=listY+4+(i-1)*rowH-off
+        if rY+rowH>listY and rY<y+h-12 then
+            local kc=rr.kind=="ADD" and T.green or (rr.kind=="DEL" and T.red or T.yellow)
+            rect(x+20,rY+4,34,15,C3(28,28,34),63,0.8,3); txt(rr.kind,x+37,rY+5,10,kc,64,true,Drawing.Fonts.SystemBold)
+            txt(trim(rr.path or "",64),x+62,rY+4,12,T.text,64)
+            if rr.detail and rr.detail~="" then txt(trim(rr.detail,26),x+cw-10,rY+4,11,T.muted,64) end
         end
     end
+    R.clipTop=nil; R.clipBot=nil
+    if #res==0 then txt("No changes.",x+24,listY+12,13,T.dim,63) end
+    R.fade=1; R.yoff=0
+end
 
-    -- Scroll arrows on right
-    if maxScroll > 0 then
-        local sbX = px + pw - 30
-        local arrowW, arrowH = 22, 22
-        local function arrow(yy, label, onClick)
-            local bgB = Drawing.new("Square")
-            bgB.Position = Vector2.new(sbX, yy); bgB.Size = Vector2.new(arrowW, arrowH)
-            bgB.Color = Color3.fromRGB(34, 34, 40); bgB.Filled = true; bgB.Corner = 3
-            bgB.Visible = true; bgB.ZIndex = zb + 5
-            table.insert(GUI.EnchantsElements, bgB)
-            local txt = Drawing.new("Text")
-            txt.Position = Vector2.new(sbX + arrowW / 2, yy + (arrowH - 13) / 1.3)
-            txt.Text = label; txt.Color = Colors.TextPrimary; txt.Size = 13
-            txt.Font = Drawing.Fonts.SystemBold; txt.Center = true; txt.Outline = false
-            txt.Visible = true; txt.ZIndex = zb + 6
-            table.insert(GUI.EnchantsElements, txt)
-            table.insert(GUI.EnchantsClickables, { x = sbX, y = yy, w = arrowW, h = arrowH, onClick = onClick })
+local last = os.clock()
+task.spawn(function()
+    while GUI.Running do
+        local nowc=os.clock(); R.dt=minf(nowc-last,0.1); last=nowc
+        R.mx,R.my=Mouse.X,Mouse.Y
+        local down=false; pcall(function() down=ismouse1pressed() end)
+        R.justP = down and not R.down
+
+        if R.resizeKey and down then
+            GUI.RSDiffW=maxf(440,(R.mx-GUI.RSDiffX)+R.resizeOX); GUI.RSDiffH=maxf(300,(R.my-GUI.RSDiffY)+R.resizeOY)
+        elseif not down then R.resizeKey=nil end
+        if R.dragKey and down then
+            GUI.RSDiffX=R.mx-R.dragOX; GUI.RSDiffY=R.my-R.dragOY
+        elseif not down then R.dragKey=nil end
+        if R.scrollOff and down then
+            local dy=R.my-R.scrollLastY
+            GUI[R.scrollOff]=maxf(0,minf(R.scrollMax,(GUI[R.scrollOff] or 0)+dy*(R.scrollMax/maxf(1,R.scrollTrackH))))
+            R.scrollLastY=R.my
+        elseif not down then R.scrollOff=nil end
+
+        beginFrame(); clicks={}; drags={}; scrolls={}; resizes={}
+        local okF,err=pcall(drawRS)
+        endFrame()
+        if not okF then pcall(warn, "[Requiem RS] "..tostring(err)) end
+
+        if R.justP and not R.dragKey and not R.scrollOff and not R.resizeKey then
+            local handled=false
+            for i=#resizes,1,-1 do local rz=resizes[i]
+                if R.mx>=rz.x and R.mx<=rz.x+rz.w and R.my>=rz.y and R.my<=rz.y+rz.h then
+                    R.resizeKey=rz.key; R.resizeOX=(GUI.RSDiffX+GUI.RSDiffW)-R.mx; R.resizeOY=(GUI.RSDiffY+GUI.RSDiffH)-R.my; handled=true; break end end
+            if not handled then for i=#scrolls,1,-1 do local s=scrolls[i]
+                if R.mx>=s.x and R.mx<=s.x+s.w and R.my>=s.y and R.my<=s.y+s.h then
+                    R.scrollOff=s.key; R.scrollMax=s.maxScroll; R.scrollTrackH=s.track; R.scrollLastY=R.my; handled=true; break end end end
+            if not handled then for i=#drags,1,-1 do local d=drags[i]
+                if R.mx>=d.x and R.mx<=d.x+d.w and R.my>=d.y and R.my<=d.y+d.h then
+                    R.dragKey=d.key; R.dragOX=R.mx-GUI.RSDiffX; R.dragOY=R.my-GUI.RSDiffY; handled=true; break end end end
+            if not handled then for i=#clicks,1,-1 do local c=clicks[i]
+                if R.mx>=c.x and R.mx<=c.x+c.w and R.my>=c.y and R.my<=c.y+c.h then pcall(c.onClick); break end end end
         end
-        arrow(gridY, "^", function()
-            if GUI.EnchantsScrollOffset > 0 then
-                GUI.EnchantsScrollOffset = GUI.EnchantsScrollOffset - 1
-                BuildEnchantsPanel()
-            end
-        end)
-        arrow(gridY + gridH - arrowH, "v", function()
-            if GUI.EnchantsScrollOffset < maxScroll then
-                GUI.EnchantsScrollOffset = GUI.EnchantsScrollOffset + 1
-                BuildEnchantsPanel()
-            end
-        end)
-        local posTxt = Drawing.new("Text")
-        posTxt.Position = Vector2.new(sbX + arrowW / 2, gridY + gridH / 2 - 8)
-        posTxt.Text = string.format("%d/%d", GUI.EnchantsScrollOffset + 1, totalRows)
-        posTxt.Color = Colors.TextMuted; posTxt.Size = 10
-        posTxt.Font = Drawing.Fonts.System; posTxt.Center = true
-        posTxt.Outline = false; posTxt.Visible = true; posTxt.ZIndex = zb + 6
-        table.insert(GUI.EnchantsElements, posTxt)
+        R.down=down
+        task.wait(GUI.RSDiffOpen and 1/120 or 0.08)
     end
+    -- teardown on unload: remove every pooled drawing
+    for _,p in pairs(pool) do for _,o in ipairs(p) do pcall(function() o:Remove() end) end end
+end)
+end)()  -- /Requiem UI smooth RS Diff engine
 
-    -- Modal popup (if open)
-    if GUI.EnchantsModal then
-        local m = GUI.EnchantsModal
-        local mw, mh = 460, 200
-        local mx = px + (pw - mw) / 2
-        local my = py + (ph - mh) / 2
-        local zbm = zb + 20
-
-        -- Dim the panel behind the modal
-        local dim = Drawing.new("Square")
-        dim.Position = Vector2.new(px, py); dim.Size = Vector2.new(pw, ph)
-        dim.Color = Color3.fromRGB(0, 0, 0); dim.Filled = true
-        dim.Transparency = 0.4; dim.Visible = true; dim.ZIndex = zbm
-        table.insert(GUI.EnchantsElements, dim)
-
-        local mbg = Drawing.new("Square")
-        mbg.Position = Vector2.new(mx, my); mbg.Size = Vector2.new(mw, mh)
-        mbg.Color = Color3.fromRGB(22, 22, 28); mbg.Filled = true; mbg.Corner = 6
-        mbg.Visible = true; mbg.ZIndex = zbm + 1
-        table.insert(GUI.EnchantsElements, mbg)
-        local mbrd = Drawing.new("Square")
-        mbrd.Position = Vector2.new(mx, my); mbrd.Size = Vector2.new(mw, mh)
-        mbrd.Color = ENCHANT_RARITY_COLORS[m.rarity] or Colors.AccentRed
-        mbrd.Filled = false; mbrd.Corner = 6; mbrd.Thickness = 2
-        mbrd.Visible = true; mbrd.ZIndex = zbm + 2
-        table.insert(GUI.EnchantsElements, mbrd)
-
-        local mTitle = Drawing.new("Text")
-        mTitle.Position = Vector2.new(mx + 16, my + 14); mTitle.Text = m.name
-        mTitle.Color = Colors.TextPrimary; mTitle.Size = 18
-        mTitle.Font = Drawing.Fonts.SystemBold; mTitle.Center = false
-        mTitle.Outline = false; mTitle.Visible = true; mTitle.ZIndex = zbm + 3
-        table.insert(GUI.EnchantsElements, mTitle)
-
-        local mRar = Drawing.new("Text")
-        mRar.Position = Vector2.new(mx + 16, my + 40); mRar.Text = "Rarity: " .. m.rarity
-        mRar.Color = ENCHANT_RARITY_COLORS[m.rarity] or Colors.TextMuted; mRar.Size = 14
-        mRar.Font = Drawing.Fonts.SystemBold; mRar.Center = false
-        mRar.Outline = false; mRar.Visible = true; mRar.ZIndex = zbm + 3
-        table.insert(GUI.EnchantsElements, mRar)
-
-        -- Description (from TALENT_DESC table)
-        local desc = TALENT_DESC[m.name]
-        if desc then
-            local dLbl = Drawing.new("Text")
-            dLbl.Position = Vector2.new(mx + 16, my + 66); dLbl.Text = "Description:"
-            dLbl.Color = Colors.TextMuted; dLbl.Size = 12
-            dLbl.Font = Drawing.Fonts.System; dLbl.Center = false
-            dLbl.Outline = false; dLbl.Visible = true; dLbl.ZIndex = zbm + 3
-            table.insert(GUI.EnchantsElements, dLbl)
-
-            -- Word-wrap description (~50 chars/line)
-            local lineLen = 50
-            local lineY = my + 84
-            local i = 1
-            while i <= #desc do
-                local seg = desc:sub(i, i + lineLen - 1)
-                local segLbl = Drawing.new("Text")
-                segLbl.Position = Vector2.new(mx + 16, lineY); segLbl.Text = seg
-                segLbl.Color = Colors.TextPrimary; segLbl.Size = 13
-                segLbl.Font = Drawing.Fonts.System; segLbl.Center = false
-                segLbl.Outline = false; segLbl.Visible = true; segLbl.ZIndex = zbm + 3
-                table.insert(GUI.EnchantsElements, segLbl)
-                lineY = lineY + 16
-                i = i + lineLen
-                if lineY > my + mh - 50 then break end
-            end
-        else
-            local noDesc = Drawing.new("Text")
-            noDesc.Position = Vector2.new(mx + 16, my + 66)
-            noDesc.Text = "Description not yet extracted."
-            noDesc.Color = Colors.TextMuted; noDesc.Size = 12
-            noDesc.Font = Drawing.Fonts.System; noDesc.Center = false
-            noDesc.Outline = false; noDesc.Visible = true; noDesc.ZIndex = zbm + 3
-            table.insert(GUI.EnchantsElements, noDesc)
-        end
-
-        -- Path at the bottom (small/muted)
-        local pathLbl = Drawing.new("Text")
-        pathLbl.Position = Vector2.new(mx + 16, my + mh - 22)
-        pathLbl.Text = "[" .. m.rarity .. "]"
-        pathLbl.Color = ENCHANT_RARITY_COLORS[m.rarity] or Colors.TextMuted
-        pathLbl.Size = 11; pathLbl.Font = Drawing.Fonts.System
-        pathLbl.Center = false; pathLbl.Outline = false
-        pathLbl.Visible = true; pathLbl.ZIndex = zbm + 3
-        table.insert(GUI.EnchantsElements, pathLbl)
-
-        -- Close button
-        local mcX = mx + mw - 28
-        local mcY = my + 8
-        local mClose = Drawing.new("Text")
-        mClose.Position = Vector2.new(mcX + 6, mcY + 2); mClose.Text = "X"
-        mClose.Color = Colors.AccentRed; mClose.Size = 17
-        mClose.Font = Drawing.Fonts.SystemBold; mClose.Center = false
-        mClose.Outline = false; mClose.Visible = true; mClose.ZIndex = zbm + 3
-        table.insert(GUI.EnchantsElements, mClose)
-        table.insert(GUI.EnchantsClickables, {
-            x = mcX, y = mcY, w = 24, h = 24,
-            onClick = function() GUI.EnchantsModal = nil; BuildEnchantsPanel() end,
-        })
-    end
-end
-
--- Dead code from earlier version (RS Diff as a page). Kept commented for diff readability.
---[[
-local function PageRSDiff()
-    local zb = 13
-    local topY  = contentTop()
-    local fullX = Config.WinX + Config.ContentPad
-    local fullW = Config.WinW - Config.ContentPad * 2
-    local actionsH = 52 + 50
-    local aY = DrawCard(fullX, topY, fullW, actionsH, "ReplicatedStorage Diff", zb)
-
-    -- Status line
-    local statusStr = GUI.RSDiffStatus
-    if statusStr == "" then
-        if GUI.RSSnapshot then
-            statusStr = "Snapshot: " .. GUI.RSSnapshotCount .. " paths, " .. rsTimeAgo(GUI.RSSnapshotAt) .. ". Click Compare to diff."
-        else
-            statusStr = "No snapshot yet. Click 'Snapshot' or 'Load Saved' to start."
-        end
-    end
-    local status = Drawing.new("Text")
-    status.Position = Vector2.new(fullX + Config.CardPad, aY + 4); status.Text = statusStr
-    status.Color = Colors.TextMuted; status.Size = 13
-    status.Font = Drawing.Fonts.System; status.Center = false
-    status.Outline = false; status.Visible = true; status.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, status)
-
-    -- Button row
-    local bY = aY + 22
-    local bW, bH, bGap = 110, 28, 10
-    local bX = fullX + Config.CardPad
-
-    local hasSnap    = GUI.RSSnapshot ~= nil
-    local confirming = GUI.RSOverwriteConfirmAt and (tick() - GUI.RSOverwriteConfirmAt < 3)
-    local snapLabel, snapColor
-    if confirming then
-        snapLabel = "Overwrite?"; snapColor = Color3.fromRGB(180, 60, 60)
-    elseif hasSnap then
-        snapLabel = "Overwrite"; snapColor = Color3.fromRGB(60, 60, 70)
-    else
-        snapLabel = "Snapshot"; snapColor = Color3.fromRGB(60, 60, 70)
-    end
-
-    DrawTextButton(bX, bY, bW, bH, snapLabel, Colors.TextPrimary, snapColor, zb, function()
-        if hasSnap and not confirming then
-            GUI.RSOverwriteConfirmAt = tick()
-            GUI.RSDiffStatus = "Click again within 3s to overwrite."
-            CreateContent("RSDiff"); return
-        end
-        GUI.RSOverwriteConfirmAt = nil
-        GUI.RSDiffStatus = "Snapshotting..."
-        CreateContent("RSDiff")
-        task.spawn(function()
-            local snap, count = TakeRSSnapshot()
-            GUI.RSSnapshot = snap
-            GUI.RSSnapshotCount = count
-            local okT, t = pcall(os.time)
-            GUI.RSSnapshotAt = okT and t or nil
-            GUI.RSDiffResults = nil
-            GUI.RSDiffScrollOffset = 0
-            local ok, err = saveRSSnapshot()
-            if ok then
-                GUI.RSDiffStatus = "Snapshot saved: " .. count .. " paths."
-            else
-                GUI.RSDiffStatus = "Captured " .. count .. " paths, save failed: " .. tostring(err)
-            end
-            if GUI.SelectedPage == "RSDiff" then CreateContent("RSDiff") end
-        end)
-    end)
-    bX = bX + bW + bGap
-
-    DrawTextButton(bX, bY, bW, bH, "Compare", Color3.fromRGB(220,220,225), Color3.fromRGB(40,60,90), zb, function()
-        if not GUI.RSSnapshot then
-            GUI.RSDiffStatus = "No snapshot. Click 'Snapshot' first."
-            CreateContent("RSDiff"); return
-        end
-        GUI.RSDiffStatus = "Comparing..."
-        CreateContent("RSDiff")
-        task.spawn(function()
-            local cur = TakeRSSnapshot()
-            local res = CompareRSSnapshots(GUI.RSSnapshot, cur)
-            GUI.RSDiffResults = res
-            GUI.RSDiffScrollOffset = 0
-            GUI.RSDiffStatus = #res .. " changes since snapshot."
-            if GUI.SelectedPage == "RSDiff" then CreateContent("RSDiff") end
-        end)
-    end)
-    bX = bX + bW + bGap
-
-    DrawTextButton(bX, bY, bW, bH, "Load Saved", Color3.fromRGB(220,220,225), Color3.fromRGB(50,70,40), zb, function()
-        local exists = false
-        pcall(function() exists = isfile and isfile(RS_SNAPSHOT_PATH) end)
-        if not exists then
-            GUI.RSDiffStatus = "No saved snapshot file on disk."
-            CreateContent("RSDiff"); return
-        end
-        GUI.RSDiffStatus = "Loading..."
-        CreateContent("RSDiff")
-        task.spawn(function()
-            loadRSSnapshot()
-            if GUI.RSSnapshot then
-                GUI.RSDiffStatus = "Loaded " .. (GUI.RSSnapshotCount or 0) .. " paths from disk."
-            else
-                GUI.RSDiffStatus = "Load failed (see console)."
-            end
-            if GUI.SelectedPage == "RSDiff" then CreateContent("RSDiff") end
-        end)
-    end)
-    bX = bX + bW + bGap
-
-    DrawTextButton(bX, bY, bW, bH, "Clear", Colors.TextPrimary, Color3.fromRGB(80,40,40), zb, function()
-        GUI.RSDiffResults = nil
-        GUI.RSDiffScrollOffset = 0
-        GUI.RSDiffStatus = ""
-        CreateContent("RSDiff")
-    end)
-
-    -- Legend
-    local legend = Drawing.new("Text")
-    legend.Position = Vector2.new(fullX + fullW - 180, bY + 8); legend.Text = "ADD  DEL  CLS"
-    legend.Color = Colors.TextMuted; legend.Size = 12
-    legend.Font = Drawing.Fonts.System; legend.Center = false
-    legend.Outline = false; legend.Visible = true; legend.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, legend)
-
-    -- Results card (scrollable list)
-    local resY = topY + actionsH + 12
-    local resH = (Config.WinY + Config.WinH - Config.FooterH - 12) - resY
-    DrawCard(fullX, resY, fullW, resH, "Changes", zb)
-
-    local listX = fullX + Config.CardPad
-    local listY = resY + 52
-    local listW = fullW - Config.CardPad * 2 - 24  -- room for scroll buttons
-    local listH = resH - 52 - 12
-    local rowH = 18
-    local maxVisible = math.floor(listH / rowH)
-
-    local results = GUI.RSDiffResults
-    if not results then
-        local hint = Drawing.new("Text")
-        hint.Position = Vector2.new(fullX + fullW / 2, listY + listH / 2 - 8)
-        hint.Text = GUI.RSSnapshot
-            and "Snapshot stored. Click 'Compare' after the game updates."
-            or  "Click 'Snapshot' to record now, or 'Load Saved' to pull the last on-disk snapshot."
-        hint.Color = Colors.TextMuted; hint.Size = 13
-        hint.Font = Drawing.Fonts.System; hint.Center = true
-        hint.Outline = false; hint.Visible = true; hint.ZIndex = zb + 3
-        table.insert(GUI.ContentElements, hint)
-    elseif #results == 0 then
-        local hint = Drawing.new("Text")
-        hint.Position = Vector2.new(fullX + fullW / 2, listY + listH / 2 - 8)
-        hint.Text = "No changes detected since last snapshot."
-        hint.Color = Colors.DiffAdd; hint.Size = 14
-        hint.Font = Drawing.Fonts.SystemBold; hint.Center = true
-        hint.Outline = false; hint.Visible = true; hint.ZIndex = zb + 3
-        table.insert(GUI.ContentElements, hint)
-    else
-        -- clamp scroll offset
-        local maxOffset = math.max(0, #results - maxVisible)
-        if GUI.RSDiffScrollOffset > maxOffset then GUI.RSDiffScrollOffset = maxOffset end
-        if GUI.RSDiffScrollOffset < 0 then GUI.RSDiffScrollOffset = 0 end
-
-        for i = 1, math.min(maxVisible, #results - GUI.RSDiffScrollOffset) do
-            local r = results[i + GUI.RSDiffScrollOffset]
-            if r then
-                local yy = listY + (i - 1) * rowH
-                local kindLbl = Drawing.new("Text")
-                kindLbl.Position = Vector2.new(listX, yy); kindLbl.Text = r.kind
-                kindLbl.Color = RS_DIFF_COLORS[r.kind] or Colors.TextPrimary
-                kindLbl.Size = 13; kindLbl.Font = Drawing.Fonts.SystemBold
-                kindLbl.Center = false; kindLbl.Outline = false; kindLbl.Visible = true; kindLbl.ZIndex = zb + 5
-                table.insert(GUI.ContentElements, kindLbl)
-
-                local pathLbl = Drawing.new("Text")
-                pathLbl.Position = Vector2.new(listX + 36, yy); pathLbl.Text = r.path .. " " .. (r.detail or "")
-                pathLbl.Color = Colors.TextPrimary; pathLbl.Size = 12
-                pathLbl.Font = Drawing.Fonts.System; pathLbl.Center = false
-                pathLbl.Outline = false; pathLbl.Visible = true; pathLbl.ZIndex = zb + 5
-                table.insert(GUI.ContentElements, pathLbl)
-            end
-        end
-
-        -- Scroll buttons (right side)
-        local sbX = fullX + fullW - Config.CardPad - 22
-        local sbH = 24
-        DrawTextButton(sbX, listY, 22, sbH, "^", Colors.TextPrimary, Color3.fromRGB(40,40,46), zb, function()
-            GUI.RSDiffScrollOffset = math.max(0, GUI.RSDiffScrollOffset - maxVisible)
-            CreateContent("RSDiff")
-        end)
-        DrawTextButton(sbX, listY + listH - sbH, 22, sbH, "v", Colors.TextPrimary, Color3.fromRGB(40,40,46), zb, function()
-            GUI.RSDiffScrollOffset = math.min(maxOffset, GUI.RSDiffScrollOffset + maxVisible)
-            CreateContent("RSDiff")
-        end)
-
-        -- Position indicator
-        local posTxt = Drawing.new("Text")
-        posTxt.Position = Vector2.new(sbX + 11, listY + listH / 2 - 8)
-        posTxt.Text = string.format("%d-%d/%d",
-            GUI.RSDiffScrollOffset + 1,
-            math.min(#results, GUI.RSDiffScrollOffset + maxVisible),
-            #results)
-        posTxt.Color = Colors.TextMuted; posTxt.Size = 10
-        posTxt.Font = Drawing.Fonts.System; posTxt.Center = true
-        posTxt.Outline = false; posTxt.Visible = true; posTxt.ZIndex = zb + 5
-        table.insert(GUI.ContentElements, posTxt)
-    end
-end
-]]
-
-local function PagePlaceholder()
-    local zb = 13
-    local topY = contentTop()
-    local fullW = Config.WinW - Config.ContentPad * 2
-    local cardW = math.floor(fullW * 0.55)
-    local cardX = Config.WinX + Config.ContentPad + math.floor((fullW - cardW) / 2)
-    local cardH = 52 + Config.RowHeight + 14
-    DrawCard(cardX, topY, cardW, cardH, "PlaceHolder", zb)
-    local msg = Drawing.new("Text")
-    msg.Position = Vector2.new(cardX + cardW / 2, topY + 64)
-    msg.Text = "Nothing here yet."
-    msg.Color = Colors.TextMuted; msg.Size = 14; msg.Font = Drawing.Fonts.System
-    msg.Center = true; msg.Outline = false; msg.Visible = true; msg.ZIndex = zb + 5
-    table.insert(GUI.ContentElements, msg)
-end
-
-local function PageSettings()
-    local zb = 13
-    local baseY = contentTop()
-    local fullW = Config.WinW - Config.ContentPad * 2
-    local cardW = math.floor(fullW * 0.55)
-    local cardX = Config.WinX + Config.ContentPad + math.floor((fullW - cardW) / 2)
-    local lx = cardX + Config.CardPad
-    local rightEdge = cardX + cardW - Config.CardPad
-    local controlsH = 52 + 2 * Config.RowHeight + 14
-    local cY = DrawCard(cardX, baseY, cardW, controlsH, "Controls", zb)
-
-    DrawKeyBindRow(lx, rightEdge, cY, "Toggle Key", GUI.ListeningForKey, GUI.ToggleKey, zb, "Settings", function() GUI.ListeningForKey = true end)
-    DrawKeyBindRow(lx, rightEdge, cY + Config.RowHeight, "Close Key", GUI.ListeningForCloseKey, GUI.CloseKey, zb, "Settings", function() GUI.ListeningForCloseKey = true end)
-
-    local cfgY = baseY + controlsH + 14
-    local cfgH = 52 + 2 * Config.RowHeight + 14
-    local cfgCY = DrawCard(cardX, cfgY, cardW, cfgH, "Config", zb)
-    local bW, bH, gap = 110, 26, 14
-    local rowX = cardX + math.floor((cardW - (bW * 2 + gap)) / 2)
-    DrawTextButton(rowX, cfgCY + 5, bW, bH, "Save Config", Color3.fromRGB(220,220,225), Color3.fromRGB(40,80,50), zb, function()
-        saveConfig(); toast("Config saved")
-    end)
-    DrawTextButton(rowX + bW + gap, cfgCY + 5, bW, bH, "Load Config", Color3.fromRGB(220,220,225), Color3.fromRGB(60,40,80), zb, function()
-        loadConfig(); CreateContent("Settings"); toast("Config loaded")
-    end)
-    DrawTextButton(rowX, cfgCY + 5 + Config.RowHeight, bW * 2 + gap, bH, "Reset to Defaults", Color3.fromRGB(255,220,220), Color3.fromRGB(60,30,30), zb, function()
-        resetConfig(); CreateContent("Settings"); toast("Config reset")
-    end)
-end
-
--- ============================================================
--- SUB-TABS
--- ============================================================
-
-ClearSubTabs = function()
-    for _, el in ipairs(GUI.SubTabElements) do pcall(function() el:Remove() end) end
-    GUI.SubTabElements = {}
-    GUI.SubTabClickables = {}
-end
-
-CreateSubTabs = function()
-    ClearSubTabs()
-    if GUI.SelectedPage ~= "Main" then return end
-    local barY = Config.WinY + Config.HeaderH
-    local halfW = Config.WinW / 2
-    local zb = 8
-    local glowX = (GUI.SubTab == "Style") and (Config.WinX + halfW) or Config.WinX
-    local glow = Drawing.new("Square")
-    glow.Position = Vector2.new(glowX, barY); glow.Size = Vector2.new(halfW, Config.SubTabH)
-    glow.Color = Colors.AccentRed; glow.Filled = true; glow.Transparency = 0.12
-    glow.Visible = true; glow.ZIndex = zb
-    table.insert(GUI.SubTabElements, glow)
-    GUI.SubTabGlow = glow
-    local elemText = Drawing.new("Text")
-    elemText.Position = Vector2.new(Config.WinX + halfW * 0.5, barY + 14); elemText.Text = "Elements"
-    elemText.Color = GUI.SubTab == "Elements" and Colors.TextPrimary or Colors.TextMuted
-    elemText.Size = 16; elemText.Font = GUI.SubTab == "Elements" and Drawing.Fonts.SystemBold or Drawing.Fonts.System
-    elemText.Center = true; elemText.Outline = false; elemText.Visible = true; elemText.ZIndex = zb + 1
-    table.insert(GUI.SubTabElements, elemText)
-    local styleText = Drawing.new("Text")
-    styleText.Position = Vector2.new(Config.WinX + halfW + halfW * 0.5, barY + 14); styleText.Text = "Style"
-    styleText.Color = GUI.SubTab == "Style" and Colors.TextPrimary or Colors.TextMuted
-    styleText.Size = 16; styleText.Font = GUI.SubTab == "Style" and Drawing.Fonts.SystemBold or Drawing.Fonts.System
-    styleText.Center = true; styleText.Outline = false; styleText.Visible = true; styleText.ZIndex = zb + 1
-    table.insert(GUI.SubTabElements, styleText)
-    local underX = (GUI.SubTab == "Style") and (Config.WinX + halfW) or Config.WinX
-    local under = Drawing.new("Line")
-    under.From = Vector2.new(underX + 1, barY + Config.SubTabH - 2)
-    under.To   = Vector2.new(underX + halfW - 1, barY + Config.SubTabH - 2)
-    under.Color = Colors.AccentRed; under.Thickness = 2; under.Visible = true; under.ZIndex = zb + 2
-    table.insert(GUI.SubTabElements, under)
-    GUI.SubTabUnderline = under
-    local function animateSubTabSwitch(newName)
-        if GUI.SubTab == newName then return end
-        local fromX = (GUI.SubTab == "Style") and (Config.WinX + halfW) or Config.WinX
-        local toX   = (newName == "Style") and (Config.WinX + halfW) or Config.WinX
-        local lineY = barY + Config.SubTabH - 2
-        GUI.SubTab = newName
-        local g, u = GUI.SubTabGlow, GUI.SubTabUnderline
-        local token = newAnimToken()
-        task.spawn(function()
-            for s = 1, 10 do
-                if not isAnimCurrent(token) then return end
-                local et = 1 - (1 - s / 10) ^ 3
-                local zx = fromX + (toX - fromX) * et
-                if g then pcall(function() g.Position = Vector2.new(zx, barY) end) end
-                if u then pcall(function()
-                    u.From = Vector2.new(zx + 1, lineY)
-                    u.To   = Vector2.new(zx + halfW - 1, lineY)
-                end) end
-                task.wait(0.016)
-            end
-            if GUI.SelectedPage == "Main" then CreateContent("Main") end
-        end)
-    end
-    table.insert(GUI.SubTabClickables, { x = Config.WinX, y = barY, w = halfW, h = Config.SubTabH,
-        onClick = function() animateSubTabSwitch("Elements") end })
-    table.insert(GUI.SubTabClickables, { x = Config.WinX + halfW, y = barY, w = halfW, h = Config.SubTabH,
-        onClick = function() animateSubTabSwitch("Style") end })
-end
-
--- ============================================================
--- CONTENT DISPATCH
--- ============================================================
-
-ClearContent = function()
-    for _, el in ipairs(GUI.ContentElements) do pcall(function() el:Remove() end) end
-    GUI.ContentElements = {}
-    GUI.Clickables = {}
-    GUI.SliderDragging = nil
-end
-
-CreateContent = function(pageKey)
-    if not GUI.Visible then ClearContent(); ClearSubTabs(); return end
-    ClearContent()
-    CreateSubTabs()
-    if pageKey == "Main" then
-        if GUI.SubTab == "Style" then PageMainStyle() else PageMainElements() end
-    elseif pageKey == "Settings" then
-        PageSettings()
-    elseif pageKey == "Tools" then
-        PageTools()
-    elseif pageKey == "Character" then
-        PageCharacter()
-    else
-        PagePlaceholder()
-    end
-    if GUI.HintText then
-        pcall(function()
-            GUI.HintText.Text = GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload"
-        end)
-    end
-end
-
--- ============================================================
--- NAV TABS
--- ============================================================
-
-local NAV_CHAR_W = 10
-local NAV_HIT_PAD = 6
-local function navUnderlineBounds(btn)
-    return btn.X - 1, btn.X + 14 + #btn.Label * NAV_CHAR_W
-end
-local function navHitBounds(btn)
-    local l, r = navUnderlineBounds(btn)
-    return l - NAV_HIT_PAD, btn.Y, (r - l) + NAV_HIT_PAD * 2, btn.H
-end
-local function UpdateNavButton(btn, isSelected, isHovered)
-    local state = isSelected and "active" or (isHovered and "hover" or "normal")
-    if btn._navState == state then return end
-    btn._navState = state
-    if state == "active" then
-        btn.Dot.Color = Colors.AccentRed; btn.Text.Color = Colors.NavActive; btn.Text.Font = Drawing.Fonts.SystemBold
-    elseif state == "hover" then
-        btn.Dot.Color = Colors.AccentDim; btn.Text.Color = Colors.TextPrimary; btn.Text.Font = Drawing.Fonts.System
-    else
-        btn.Dot.Color = Colors.TextMuted; btn.Text.Color = Colors.NavNormal; btn.Text.Font = Drawing.Fonts.System
-    end
-end
-
-local function CreateNavButtons()
-    GUI.NavButtons = {}
-    local startX = Config.WinX + 110 + 39
-    local tabSpacing = 150
-    local tabY = Config.WinY - 1
-    for i, def in ipairs(NavDefs) do
-        local btn = { Key = def.key, Label = def.label, X = startX + (i-1) * tabSpacing, Y = tabY, W = tabSpacing, H = Config.HeaderH }
-        btn.Dot = Drawing.new("Circle")
-        btn.Dot.Position = Vector2.new(btn.X + 3, tabY + Config.HeaderH / 2 + 2)
-        btn.Dot.Radius = 4; btn.Dot.Color = Colors.NavNormal; btn.Dot.Filled = true
-        btn.Dot.NumSides = 12; btn.Dot.Visible = true; btn.Dot.ZIndex = 7
-        table.insert(GUI.Elements, btn.Dot)
-        btn.Text = Drawing.new("Text")
-        btn.Text.Position = Vector2.new(btn.X + 14, tabY + Config.HeaderH / 2 - 8)
-        btn.Text.Text = def.label; btn.Text.Color = Colors.NavNormal; btn.Text.Size = 18
-        btn.Text.Font = Drawing.Fonts.System; btn.Text.Center = false
-        btn.Text.Outline = false; btn.Text.Visible = true; btn.Text.ZIndex = 7
-        table.insert(GUI.Elements, btn.Text)
-        GUI.NavButtons[i] = btn
-    end
-    local underlineY = tabY + Config.HeaderH - 2
-    local activeBtn = GUI.NavButtons[1]
-    for _, b in ipairs(GUI.NavButtons) do if b.Key == GUI.SelectedPage then activeBtn = b; break end end
-    local leftX, rightX = navUnderlineBounds(activeBtn)
-    local under = Drawing.new("Line")
-    under.From = Vector2.new(leftX, underlineY); under.To = Vector2.new(rightX, underlineY)
-    under.Color = Colors.AccentRed; under.Thickness = 2; under.Visible = true; under.ZIndex = 7
-    table.insert(GUI.Elements, under)
-    GUI.MainTabUnderline = under
-end
-
-animateMainTabUnderline = function(toBtn)
-    local under = GUI.MainTabUnderline
-    if not (under and toBtn) then return end
-    local fromL, fromR, fromY
-    pcall(function() fromL = under.From.X end)
-    pcall(function() fromR = under.To.X end)
-    pcall(function() fromY = under.From.Y end)
-    local toL, toR = navUnderlineBounds(toBtn)
-    local lineY = fromY or (toBtn.Y + Config.HeaderH - 2)
-    fromL = fromL or toL; fromR = fromR or toR
-    local token = newAnimToken()
-    task.spawn(function()
-        for s = 1, 10 do
-            if not isAnimCurrent(token) then return end
-            local et = 1 - (1 - s / 10) ^ 3
-            pcall(function()
-                under.From = Vector2.new(fromL + (toL - fromL) * et, lineY)
-                under.To   = Vector2.new(fromR + (toR - fromR) * et, lineY)
-            end)
-            task.wait(0.016)
-        end
-    end)
-end
-
--- ============================================================
--- WINDOW CHROME
--- ============================================================
-
-local function Init()
-    local wx, wy, ww, wh = Config.WinX, Config.WinY, Config.WinW, Config.WinH
-    local function sq(x, y, w, h, color, z, corner, transp)
-        local s = Drawing.new("Square")
-        s.Position = Vector2.new(x, y); s.Size = Vector2.new(w, h); s.Color = color
-        s.Filled = true; s.Visible = true; s.ZIndex = z
-        if corner then s.Corner = corner end
-        if transp then s.Transparency = transp end
-        table.insert(GUI.Elements, s); return s
-    end
-    local function ln(x1, y1, x2, y2, color, z)
-        local l = Drawing.new("Line")
-        l.From = Vector2.new(x1, y1); l.To = Vector2.new(x2, y2); l.Color = color
-        l.Thickness = 1; l.Visible = true; l.ZIndex = z
-        table.insert(GUI.Elements, l); return l
-    end
-    local function txt(x, y, s, size, color, font, z, center)
-        local t = Drawing.new("Text")
-        t.Position = Vector2.new(x, y); t.Text = s; t.Color = color; t.Size = size
-        t.Font = font; t.Center = center or false; t.Outline = false; t.Visible = true; t.ZIndex = z
-        table.insert(GUI.Elements, t); return t
-    end
-    sq(wx, wy, ww, wh, Colors.WindowBg, 1, Config.Corner, 0.40)
-    sq(wx, wy, ww, Config.HeaderH, Colors.HeaderBg, 3, Config.Corner)
-    sq(wx, wy + Config.HeaderH - 6, ww, 6, Colors.HeaderBg, 3)
-    ln(wx, wy + Config.HeaderH, wx + ww, wy + Config.HeaderH, Colors.Separator, 5)
-    txt(wx + 16, wy + 11, "Verfall", 16, Colors.AccentRed, Drawing.Fonts.SystemBold, 6)
-    local st = sq(wx, wy + Config.HeaderH, ww, Config.SubTabH, Colors.SubTabBg, 3); st.Transparency = 0.40
-    ln(wx, wy + Config.HeaderH + Config.SubTabH, wx + ww, wy + Config.HeaderH + Config.SubTabH, Colors.Separator, 5)
-    sq(wx, wy + wh - Config.FooterH, ww, Config.FooterH, Colors.FooterBg, 3)
-    ln(wx, wy + wh - Config.FooterH, wx + ww, wy + wh - Config.FooterH, Colors.Separator, 5)
-    local fdot = Drawing.new("Circle")
-    fdot.Position = Vector2.new(wx + 13, wy + wh - Config.FooterH / 2); fdot.Radius = 4
-    fdot.Color = Colors.StatusOn; fdot.Filled = true; fdot.NumSides = 10; fdot.Visible = true; fdot.ZIndex = 6
-    table.insert(GUI.Elements, fdot)
-    txt(wx + 22, wy + wh - Config.FooterH + 8, "Verfall v2.1", 12, Colors.TextMuted, Drawing.Fonts.System, 6)
-    GUI.HintText = txt(wx + ww - 144, wy + wh - Config.FooterH + 8,
-        GetKeyName(GUI.ToggleKey) .. " Toggle | " .. GetKeyName(GUI.CloseKey) .. " Unload",
-        14, Colors.TextMuted, Drawing.Fonts.System, 6)
-    CreateNavButtons()
-    CreateContent(GUI.SelectedPage)
-    for _, btn in ipairs(GUI.NavButtons) do UpdateNavButton(btn, btn.Key == GUI.SelectedPage, false) end
-end
-
-MoveWindow = function(dx, dy)
-    Config.WinX = Config.WinX + dx
-    Config.WinY = Config.WinY + dy
-    local function moveEl(el)
-        pcall(function() if el.Position then el.Position = Vector2.new(el.Position.X + dx, el.Position.Y + dy) end end)
-        pcall(function() if el.From then el.From = Vector2.new(el.From.X + dx, el.From.Y + dy) end end)
-        pcall(function() if el.To then el.To = Vector2.new(el.To.X + dx, el.To.Y + dy) end end)
-    end
-    for _, el in ipairs(GUI.Elements) do moveEl(el) end
-    for _, el in ipairs(GUI.ContentElements) do moveEl(el) end
-    for _, el in ipairs(GUI.SubTabElements) do moveEl(el) end
-    for _, btn in ipairs(GUI.NavButtons) do btn.X = btn.X + dx; btn.Y = btn.Y + dy end
-    for _, c in ipairs(GUI.Clickables) do c.x = c.x + dx; c.y = c.y + dy end
-    for _, c in ipairs(GUI.SubTabClickables) do c.x = c.x + dx; c.y = c.y + dy end
-end
-
--- ============================================================
--- SPRINT (Matcha-compatible — uses AssemblyLinearVelocity write since
--- Humanoid.WalkSpeed is blocked by Matcha's property wrapper.
--- Only applies when sprint key + a movement key are both held.)
--- ============================================================
-
--- Sprint = Matcha's "Slippery" mode replicated: pin HRP.AssemblyLinearVelocity
--- to (cameraForward * speed) each Heartbeat while Shift+WASD held. Preserves
--- Y so jump/gravity still works. This is the same mechanic Matcha uses
--- internally — runs at 60Hz via Heartbeat (not the 33Hz FeatureLoop).
-local function applySprintTick()
-    if not Features.SprintSpeed then return end
-    if not UIS:IsKeyDown(Enum.KeyCode.LeftShift) then return end
-
-    local W = UIS:IsKeyDown(Enum.KeyCode.W)
-    local A = UIS:IsKeyDown(Enum.KeyCode.A)
-    local S = UIS:IsKeyDown(Enum.KeyCode.S)
-    local D = UIS:IsKeyDown(Enum.KeyCode.D)
-    if not (W or A or S or D) then return end
-
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    local cf
-    pcall(function() cf = Workspace.CurrentCamera.CFrame end)
-    if not cf then return end
-    local fwd = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
-    if fwd.Magnitude < 0.01 then return end
-    fwd = fwd.Unit
-    local right = Vector3.new(fwd.Z, 0, -fwd.X)
-
-    local mv = Vector3.new(0, 0, 0)
-    if W then mv = mv + fwd end
-    if S then mv = mv - fwd end
-    if D then mv = mv + right end
-    if A then mv = mv - right end
-    if mv.Magnitude < 0.1 then return end
-    mv = mv.Unit
-
-    -- Preserve Y velocity so jumping/falling still works naturally.
-    local cy = 0
-    pcall(function() cy = hrp.AssemblyLinearVelocity.Y end)
-    pcall(function()
-        hrp.AssemblyLinearVelocity = Vector3.new(mv.X * Sprint.Speed, cy, mv.Z * Sprint.Speed)
-    end)
-end
 
 -- ============================================================
 -- HORSE BOOST + ESP (unchanged from Verfall v2.0)
@@ -2965,15 +890,6 @@ applyHorseBoost = function()
     pcall(function() h:SetAttribute("Stamina",    HORSE_MAX_STAMINA) end)
     pcall(function() h:SetAttribute("RegenRate",  HORSE_REGEN) end)
     pcall(function() h:SetAttribute("MaxSpeed",   Horse.MaxSpeed) end)
-end
-
--- Returns the horse's root BasePart (for velocity reads/writes).
-local function horseRoot(h)
-    if not h then return nil end
-    return h.PrimaryPart
-        or h:FindFirstChild("HumanoidRootPart")
-        or h:FindFirstChild("Torso")
-        or h:FindFirstChildWhichIsA("BasePart")
 end
 
 -- (Horse "Never Stops" and "Combat / Running With Sword" removed 2026-06-15.)
@@ -3253,54 +1169,6 @@ local function pinAttrOnce(attrName, key)
     return pcall(function() ci:SetAttribute(attrName, b.target) end)
 end
 
-local function pinBladeDuraOnce()
-    local target = BuffsState.BladeDura and BuffsState.BladeDura.target or 5
-    local char = LocalPlayer.Character
-    if char then
-        for _, n in ipairs(BLADE_DURA_NAMES) do
-            pcall(function() char:SetAttribute(n, target) end)
-            for _, c in ipairs(char:GetChildren()) do
-                if c:IsA("Tool") then pcall(function() c:SetAttribute(n, target) end) end
-            end
-        end
-    end
-    pcall(function()
-        for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do
-            for _, n in ipairs(BLADE_DURA_NAMES) do
-                pcall(function() t:SetAttribute(n, target) end)
-            end
-        end
-    end)
-    return true
-end
-
--- Dispatcher wired to the Pin button. Commits any in-progress edit for this
--- box first, then applies the value exactly once. (forward-declared above)
-pinBuffOnce = function(buffKey)
-    -- If the user was mid-typing in this box, commit that value to target now.
-    if GUI.ActiveInput == buffKey then
-        local n = tonumber(GUI.InputBuffer)
-        local b = BuffsState[buffKey]
-        if b and n and n > 0 then b.target = math.min(n, b.max or 100000) end
-        GUI.ActiveInput = nil
-        GUI.InputBuffer = ""
-        GUI.InputLastKey = {}
-    end
-    local b = BuffsState[buffKey]
-    if not b then return end
-    local ok
-    if buffKey == "BladeDura" then
-        ok = pinBladeDuraOnce()
-    else
-        ok = pinAttrOnce(buffKey, buffKey)
-    end
-    if ok then
-        toast(("Pinned %s = %s"):format(buffKey, fmtNum(b.target)))
-    else
-        toast("ClientInformation not found — join a round first")
-    end
-    CreateContent(GUI.SelectedPage)
-end
 
 applyNapeFollow = function()
     restoreNapeFollow()
@@ -3531,63 +1399,179 @@ applyCanRollUnlock = function()
     end)
 end
 
+
+-- ============================================================
+-- MATCHA ESP ENGINE (from ESP Matcha.md)
+-- ============================================================
+-- Matcha's Drawing overlay is smoother from paced task.wait loops than
+-- RunService connections. Discovery stays on a slow tick; render only
+-- repositions/toggles persistent Drawing objects.
+
+do
+
+local ESP_RENDER_HZ = 144
+local ESP_SCAN_INTERVAL = 0.50
+local TITAN_SCAN_INTERVAL = 0.45
+local ESP_SMOOTH_K = 22          -- exp-smoothing stiffness (frame-rate independent; higher = snappier)
+local V2 = Vector2.new
+local V3 = Vector3.new
+local floor = math.floor
+local exp = math.exp
+local min = math.min
+local max = math.max
+
+local PLAYER_HEAD_OFF = V3(0, 3, 0)
+local PLAYER_FOOT_OFF = V3(0, 3, 0)
+local TITAN_HEAD_OFF  = V3(0, 9, 0)
+local TITAN_FOOT_OFF  = V3(0, 9, 0)
+
+local TITAN_ESP = {
+    Objects     = {},
+    Color       = Color3.fromRGB(255, 120, 40),
+    NapeColor   = Color3.fromRGB(255, 60, 60),
+    MaxDistance = 100000,
+}
+
+local function roundPx(n)
+    return floor((n or 0) + 0.5)
+end
+
+local function rv2(x, y)
+    return V2(roundPx(x), roundPx(y))
+end
+
 local function localRootPos()
     local char = LocalPlayer.Character
-    if char then
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if hrp then return hrp.Position end
-    end
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+    if not hrp then return nil end
+    local ok, pos = pcall(function() return hrp.Position end)
+    if ok then return pos end
     return nil
 end
 
-local CHAR_W_BOLD = 6.1
-local CHAR_W_REG  = 7
+local function getRoot(model)
+    if not model then return nil end
+    return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+end
 
--- LIGHTWEIGHT ESP: 5 Drawing objects per player (was ~16). The object count is
--- what costs FPS in Matcha — every property write is a Lua->executor bridge call,
--- so fewer objects = dramatically smoother in populated servers.
---   box    = single Square outline (replaces 8 corner-bracket Lines)
---   name   = Text, Center=true, Outline=true (no background pill needed)
---   dist   = Text, Center=true, Outline=true (no background pill)
---   hpFill = single thin Square bar (no bg, no number pill)
---   tracer = Line
+local function stableInstanceKey(inst, fallback)
+    local ok, addr = pcall(function() return inst.Address end)
+    if ok and addr ~= nil then return tostring(addr) end
+    local okName, nm = pcall(function() return inst.Name end)
+    if okName and nm then return nm .. ":" .. tostring(fallback or "") end
+    return tostring(fallback or "")
+end
+
+local function project(pos)
+    local ok, screen, onScreen = pcall(WorldToScreen, pos)
+    if ok then return screen, onScreen end
+    return nil, false
+end
+
+local lastVPW, lastVPH = 2560, 1440
+local function viewportSize()
+    pcall(function()
+        local cam = Workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize
+        if vp then
+            lastVPW, lastVPH = vp.X, vp.Y
+        end
+    end)
+    return lastVPW, lastVPH
+end
+
+local function setVis(o, el, key, want)
+    if o.cache[key] ~= want then
+        o.cache[key] = want
+        el.Visible = want
+    end
+end
+
 local function makeEspObj(model)
     local box = Drawing.new("Square")
-    box.Thickness = 1; box.Filled = false; box.Color = PLAYER_ESP.Color
-    box.Visible = false; box.ZIndex = 2
+    box.Thickness = 1
+    box.Filled = false
+    box.Color = PLAYER_ESP.Color
+    box.Visible = false
+    box.ZIndex = 2
+
     local name = Drawing.new("Text")
-    name.Size = 13; name.Center = true; name.Outline = true; name.Font = Drawing.Fonts.System
-    name.Color = PLAYER_ESP.Color; name.Visible = false; name.ZIndex = 3
+    name.Size = 13
+    name.Center = true
+    name.Outline = true
+    name.Font = Drawing.Fonts.System
+    name.Color = PLAYER_ESP.Color
+    name.Visible = false
+    name.ZIndex = 3
+
     local dist = Drawing.new("Text")
-    dist.Size = 12; dist.Center = true; dist.Outline = true; dist.Font = Drawing.Fonts.System
-    dist.Color = PLAYER_ESP.Color; dist.Visible = false; dist.ZIndex = 3
+    dist.Size = 12
+    dist.Center = true
+    dist.Outline = true
+    dist.Font = Drawing.Fonts.System
+    dist.Color = PLAYER_ESP.Color
+    dist.Visible = false
+    dist.ZIndex = 3
+
     local hpFill = Drawing.new("Square")
-    hpFill.Filled = true; hpFill.Color = Color3.fromRGB(60, 220, 80)
-    hpFill.Visible = false; hpFill.ZIndex = 2
+    hpFill.Filled = true
+    hpFill.Color = Color3.fromRGB(60, 220, 80)
+    hpFill.Visible = false
+    hpFill.ZIndex = 2
+
     local hpNum = Drawing.new("Text")
-    hpNum.Size = 12; hpNum.Center = true; hpNum.Outline = true; hpNum.Font = Drawing.Fonts.System
-    hpNum.Color = Color3.fromRGB(60, 220, 80); hpNum.Visible = false; hpNum.ZIndex = 3
+    hpNum.Size = 12
+    hpNum.Center = true
+    hpNum.Outline = true
+    hpNum.Font = Drawing.Fonts.System
+    hpNum.Color = Color3.fromRGB(60, 220, 80)
+    hpNum.Visible = false
+    hpNum.ZIndex = 3
+
     local tracer = Drawing.new("Line")
-    tracer.Thickness = 1; tracer.Color = PLAYER_ESP.Color; tracer.Visible = false; tracer.ZIndex = 1
-    return { model = model, hrp = nil, hum = nil, displayName = nil,
-             box = box, name = name, dist = dist, hpFill = hpFill, hpNum = hpNum, tracer = tracer, cache = {} }
+    tracer.Thickness = 1
+    tracer.Color = PLAYER_ESP.Color
+    tracer.Visible = false
+    tracer.ZIndex = 1
+
+    return {
+        model = model,
+        hrp = nil,
+        hum = nil,
+        displayName = nil,
+        smoothPos = nil,
+        box = box,
+        name = name,
+        dist = dist,
+        hpFill = hpFill,
+        hpNum = hpNum,
+        tracer = tracer,
+        cache = {},
+    }
 end
 
 local function hideEspObj(o)
-    -- Already fully hidden last frame? Do nothing — common case for culled/offscreen
-    -- players, so guarding it saves a ton of redundant bridge writes.
-    if o.cache.hidden then return end
+    if not o or not o.cache or o.cache.hidden then return end
     o.cache.hidden = true
     pcall(function()
         o.box.Visible = false
-        o.name.Visible = false; o.dist.Visible = false
-        o.hpFill.Visible = false; o.hpNum.Visible = false
+        o.name.Visible = false
+        o.dist.Visible = false
+        o.hpFill.Visible = false
+        o.hpNum.Visible = false
         o.tracer.Visible = false
     end)
-    o.cache.boxVis, o.cache.nameVis, o.cache.distVis = false, false, false
-    o.cache.hpFillVis, o.cache.hpNumVis, o.cache.tracerVis = false, false, false
+    o.cache.boxVis = false
+    o.cache.nameVis = false
+    o.cache.distVis = false
+    o.cache.hpFillVis = false
+    o.cache.hpNumVis = false
+    o.cache.tracerVis = false
 end
+
 local function removeEspObj(o)
+    if not o then return end
     pcall(function() o.box:Remove() end)
     pcall(function() o.name:Remove() end)
     pcall(function() o.dist:Remove() end)
@@ -3595,219 +1579,560 @@ local function removeEspObj(o)
     pcall(function() o.hpNum:Remove() end)
     pcall(function() o.tracer:Remove() end)
 end
--- These run in the per-player hot loop which is wrapped in a single pcall,
--- so they use direct assignment (no per-call closure allocation).
-local function setVis(o, el, key, want)
-    if o.cache[key] ~= want then o.cache[key] = want; el.Visible = want end
+
+local function makeTitanObj(model, key)
+    local box = Drawing.new("Square")
+    box.Thickness = 1
+    box.Filled = false
+    box.Color = TITAN_ESP.Color
+    box.Visible = false
+    box.ZIndex = 2
+
+    local name = Drawing.new("Text")
+    name.Size = 13
+    name.Center = true
+    name.Outline = true
+    name.Font = Drawing.Fonts.System
+    name.Color = TITAN_ESP.Color
+    name.Visible = false
+    name.ZIndex = 3
+
+    local hpFill = Drawing.new("Square")
+    hpFill.Filled = true
+    hpFill.Color = Color3.fromRGB(60, 220, 80)
+    hpFill.Visible = false
+    hpFill.ZIndex = 2
+
+    local hpNum = Drawing.new("Text")
+    hpNum.Size = 12
+    hpNum.Center = true
+    hpNum.Outline = true
+    hpNum.Font = Drawing.Fonts.System
+    hpNum.Color = Color3.fromRGB(60, 220, 80)
+    hpNum.Visible = false
+    hpNum.ZIndex = 3
+
+    local nape = Drawing.new("Circle")
+    nape.Thickness = 2
+    nape.Filled = false
+    nape.NumSides = 14
+    nape.Radius = 5
+    nape.Color = TITAN_ESP.NapeColor
+    nape.Visible = false
+    nape.ZIndex = 3
+
+    return {
+        key = key,
+        model = model,
+        hrp = nil,
+        box = box,
+        name = name,
+        hpFill = hpFill,
+        hpNum = hpNum,
+        nape = nape,
+        cache = {},
+    }
 end
 
--- Key ESP objects by player NAME (not model reference). When a player
--- respawns, the model reference changes but the name stays — we just
--- update o.model in place and keep all Drawing elements alive.
--- No tear-down + rebuild = no flicker.
-local function espScan()
-    local world = Workspace:FindFirstChild("World")
-    local chars = world and world:FindFirstChild("Characters")
-    if not chars then return end
-    local present = {}
-    for _, model in ipairs(chars:GetChildren()) do
-        if model.Name ~= LocalPlayer.Name and (model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart) then
-            local key = model.Name
-            present[key] = true
-            local existing = PLAYER_ESP.Objects[key]
-            if existing then
-                -- Update model ref on respawn, but keep Drawing elements
-                if existing.model ~= model then
-                    existing.model = model
-                    existing.hrp = nil  -- force re-cache HRP from new model
-                    existing.hum = nil
-                    existing.displayName = nil
-                    existing.smoothPos = nil  -- snap to new spawn pos, don't slide across screen
-                end
+local function hideTitanObj(o)
+    if not o or not o.cache or o.cache.hidden then return end
+    o.cache.hidden = true
+    pcall(function()
+        o.box.Visible = false
+        o.name.Visible = false
+        o.hpFill.Visible = false
+        o.hpNum.Visible = false
+        o.nape.Visible = false
+    end)
+    o.cache.boxVis = false
+    o.cache.nameVis = false
+    o.cache.hpFillVis = false
+    o.cache.hpNumVis = false
+    o.cache.napeVis = false
+end
+
+local function removeTitanObj(o)
+    if not o then return end
+    pcall(function() o.box:Remove() end)
+    pcall(function() o.name:Remove() end)
+    pcall(function() o.hpFill:Remove() end)
+    pcall(function() o.hpNum:Remove() end)
+    pcall(function() o.nape:Remove() end)
+end
+
+-- CHUNKED player discovery. THE ~1s ESP stutter root cause: in AoT the Characters folder
+-- holds EVERY player in the server (not just nearby ones), so reading each one's .Name in a
+-- single burst every scan = 30-40 Matcha bridge round-trips back-to-back, which freezes the
+-- cooperative scheduler for a frame each scan — a steady tick that's there even when you're
+-- alone (the folder is full server-wide) and only when ESP is on (this is the only thing
+-- gated by it). Fix: start a fresh pass every ESP_SCAN_INTERVAL, then process only a few
+-- characters PER TICK (each .Name read pcall'd) so the burst is spread over several frames
+-- and never blocks the render loop. NEVER compare shims with ~= (o.model ~= model is always
+-- true in Matcha → would restart the position smoothing every scan); just refresh o.model.
+local _pKids, _pIdx, _pPresent, _pNextAt = nil, 0, nil, 0
+local ESP_SCAN_CHUNK = 5
+local function espScanStep(nowc)
+    if not _pKids then
+        if nowc < _pNextAt then return end          -- wait out the gap between passes
+        local world = Workspace:FindFirstChild("World")
+        local chars = world and world:FindFirstChild("Characters")
+        if not chars then
+            for key, o in pairs(PLAYER_ESP.Objects) do removeEspObj(o); PLAYER_ESP.Objects[key] = nil end
+            _pNextAt = nowc + ESP_SCAN_INTERVAL
+            return
+        end
+        local ok, kids = pcall(function() return chars:GetChildren() end)
+        if not ok or type(kids) ~= "table" then _pNextAt = nowc + ESP_SCAN_INTERVAL; return end
+        _pKids, _pIdx, _pPresent = kids, 0, {}
+    end
+    local localName = LocalPlayer.Name
+    local stop = min(_pIdx + ESP_SCAN_CHUNK, #_pKids)
+    for i = _pIdx + 1, stop do
+        local model = _pKids[i]
+        local nm
+        pcall(function() nm = model.Name end)
+        if nm and nm ~= localName then
+            _pPresent[nm] = true
+            local o = PLAYER_ESP.Objects[nm]
+            if not o then
+                local okM, newO = pcall(makeEspObj, model)
+                if okM and newO then PLAYER_ESP.Objects[nm] = newO end
             else
-                local newObj = makeEspObj(model)
-                PLAYER_ESP.Objects[key] = newObj
+                o.model = model   -- refresh ref only; drawPlayer self-heals o.hrp + snaps on respawn
             end
         end
     end
-    -- Only remove ESP for players whose name actually left the folder
-    for key, o in pairs(PLAYER_ESP.Objects) do
-        if not present[key] then removeEspObj(o); PLAYER_ESP.Objects[key] = nil end
+    _pIdx = stop
+    if _pIdx >= #_pKids then                          -- pass complete → prune departed, schedule next
+        for key, o in pairs(PLAYER_ESP.Objects) do
+            if not _pPresent[key] then removeEspObj(o); PLAYER_ESP.Objects[key] = nil end
+        end
+        _pKids, _pPresent = nil, nil
+        _pNextAt = nowc + ESP_SCAN_INTERVAL
     end
 end
 
-local function espUpdate()
+-- CHUNKED titan discovery — same spread-the-burst fix as espScanStep (stableInstanceKey
+-- reads .Address per titan, another per-scan bridge burst). A few titans per tick.
+local _tKids, _tIdx, _tPresent, _tNextAt = nil, 0, nil, 0
+local TITAN_SCAN_CHUNK = 5
+local function titanScanStep(nowc)
+    if not _tKids then
+        if nowc < _tNextAt then return end
+        local world = Workspace:FindFirstChild("World")
+        local titans = world and world:FindFirstChild("Titans")
+        if not titans then
+            for key, o in pairs(TITAN_ESP.Objects) do removeTitanObj(o); TITAN_ESP.Objects[key] = nil end
+            _tNextAt = nowc + TITAN_SCAN_INTERVAL
+            return
+        end
+        local ok, kids = pcall(function() return titans:GetChildren() end)
+        if not ok or type(kids) ~= "table" then _tNextAt = nowc + TITAN_SCAN_INTERVAL; return end
+        _tKids, _tIdx, _tPresent = kids, 0, {}
+    end
+    local stop = min(_tIdx + TITAN_SCAN_CHUNK, #_tKids)
+    for i = _tIdx + 1, stop do
+        local model = _tKids[i]
+        local key = stableInstanceKey(model, i)
+        _tPresent[key] = true
+        local o = TITAN_ESP.Objects[key]
+        if not o then
+            local okM, newO = pcall(makeTitanObj, model, key)
+            if okM and newO then TITAN_ESP.Objects[key] = newO end
+        else
+            o.model = model
+        end
+    end
+    _tIdx = stop
+    if _tIdx >= #_tKids then
+        for key, o in pairs(TITAN_ESP.Objects) do
+            if not _tPresent[key] then removeTitanObj(o); TITAN_ESP.Objects[key] = nil end
+        end
+        _tKids, _tPresent = nil, nil
+        _tNextAt = nowc + TITAN_SCAN_INTERVAL
+    end
+end
+
+local function markPlayerCull(myPos)
+    local maxRender = PLAYER_ESP.MaxRender or 22
+    local count = 0
+    for _, o in pairs(PLAYER_ESP.Objects) do
+        o._culled = false
+        count = count + 1
+    end
+    if count <= maxRender or not myPos then return end
+
+    local list = {}
+    for _, o in pairs(PLAYER_ESP.Objects) do
+        local root = o.hrp
+        if not root or not root.Parent then
+            root = getRoot(o.model)
+            o.hrp = root
+        end
+        if root then
+            local ok, pos = pcall(function() return root.Position end)
+            if ok and pos then
+                list[#list + 1] = { o = o, d = (pos - myPos).Magnitude }
+            end
+        end
+    end
+
+    if #list > maxRender then
+        table.sort(list, function(a, b) return a.d < b.d end)
+        for i = maxRender + 1, #list do
+            list[i].o._culled = true
+        end
+    end
+end
+
+local function drawPlayer(o, myPos, vpW, vpH, col, colVer, dt)
+    if o._culled then hideEspObj(o); return end
+
+    local model = o.model
+    if not model or not model.Parent then hideEspObj(o); return end
+
+    local root = o.hrp
+    if not root or not root.Parent then
+        root = getRoot(model)
+        o.hrp = root
+    end
+    if not root then hideEspObj(o); return end
+
+    -- Frame-rate-independent exponential smoothing on scalar components. Glides
+    -- the low-rate server position into smooth motion without allocating a
+    -- Vector3 per frame (the old per-frame :Lerp was the main GC/stutter source);
+    -- snaps on big jumps (respawn / teleport) so it never trails across the map.
+    local rp = root.Position
+    local sx, sy, sz = o.sx, o.sy, o.sz
+    if sx then
+        local jx, jy, jz = rp.X - sx, rp.Y - sy, rp.Z - sz
+        if jx*jx + jy*jy + jz*jz > 1600 then            -- >40 studs → snap
+            sx, sy, sz = rp.X, rp.Y, rp.Z
+        else
+            local a = 1 - exp(-ESP_SMOOTH_K * (dt or 0.007))
+            sx, sy, sz = sx + jx*a, sy + jy*a, sz + jz*a
+        end
+    else
+        sx, sy, sz = rp.X, rp.Y, rp.Z
+    end
+    o.sx, o.sy, o.sz = sx, sy, sz
+    local pos = V3(sx, sy, sz)
+
+    local dist = myPos and (pos - myPos).Magnitude or nil
+    if dist and dist > PLAYER_ESP.MaxDistance then hideEspObj(o); return end
+
+    local headS, onHead = project(pos + PLAYER_HEAD_OFF)
+    local footS, onFoot = project(pos - PLAYER_FOOT_OFF)
+    if not (headS and footS) or (not onHead and not onFoot) then hideEspObj(o); return end
+
+    o.cache.hidden = nil
+    if o.cache.colVer ~= colVer then
+        o.cache.colVer = colVer
+        o.box.Color = col
+        o.name.Color = col
+        o.dist.Color = col
+        o.tracer.Color = col
+    end
+
+    local topY = min(headS.Y, footS.Y)
+    local bottomY = max(headS.Y, footS.Y)
+    local boxH = max(6, bottomY - topY)
+    local boxW = boxH * 0.42
+    local centerX = (headS.X + footS.X) * 0.5
+    local boxX = centerX - boxW * 0.5
+
+    if PLAYER_ESP.ShowBox and boxH > 0 then
+        o.box.Position = rv2(boxX, topY)
+        o.box.Size = rv2(boxW, boxH)
+        setVis(o, o.box, "boxVis", true)
+    else
+        setVis(o, o.box, "boxVis", false)
+    end
+
+    if not o.displayName then
+        local fn = model:GetAttribute("FirstName")
+        if fn == nil then
+            local fc = model:FindFirstChild("FirstName")
+            if fc then fn = fc.Value end
+        end
+        if type(fn) == "string" and fn ~= "" then
+            o.displayName = fn .. " (" .. model.Name .. ")"
+        end
+    end
+
+    local nameStr = PLAYER_ESP.ShowName and (o.displayName or model.Name) or ""
+    if nameStr ~= "" then
+        o.name.Position = rv2(centerX, topY - 16)
+        if o.cache.nameTxt ~= nameStr then
+            o.cache.nameTxt = nameStr
+            o.name.Text = nameStr
+        end
+        setVis(o, o.name, "nameVis", true)
+    else
+        setVis(o, o.name, "nameVis", false)
+    end
+
+    local belowY = bottomY + 1
+    local showHp = PLAYER_ESP.ShowHealthBar and boxH > 4
+    if showHp then
+        -- Health changes slowly; re-read the Humanoid at ~12Hz instead of every frame (each
+        -- read is Health + MaxHealth + a Parent check = ~3 bridge round-trips/player). The
+        -- bar geometry below still applies the cached pct EVERY frame so it tracks the box.
+        local nowc = os.clock()
+        if not o._hpAt or (nowc - o._hpAt) > 0.08 then
+            o._hpAt = nowc
+            local hum = o.hum
+            if not hum or not hum.Parent then
+                hum = model:FindFirstChildWhichIsA("Humanoid")
+                o.hum = hum
+            end
+            local hp, maxHp = 1, 1
+            if hum then
+                hp = tonumber(hum.Health) or hp
+                maxHp = tonumber(hum.MaxHealth) or maxHp
+            end
+            o._hpPct   = maxHp > 0 and max(0, min(1, hp / maxHp)) or 0
+            o._hpStr   = tostring(floor(hp + 0.5))
+            o._hpColor = Color3.fromRGB(floor(255 * (1 - o._hpPct)), floor(220 * o._hpPct), 60)
+        end
+        local pct = o._hpPct or 0
+        local barW = 3
+        local fillH = boxH * pct
+        o.hpFill.Position = rv2(boxX - barW - 3, topY + (boxH - fillH))
+        o.hpFill.Size = rv2(barW, fillH)
+        o.hpFill.Color = o._hpColor
+        setVis(o, o.hpFill, "hpFillVis", true)
+    else
+        setVis(o, o.hpFill, "hpFillVis", false)
+    end
+
+    local distInt = (PLAYER_ESP.ShowDistance and dist) and floor(dist + 0.5) or nil
+    if distInt then
+        o.dist.Position = rv2(centerX, belowY)
+        if o.cache.distInt ~= distInt then        -- build the string ONLY when the integer changes (no per-frame concat → no GC churn)
+            o.cache.distInt = distInt
+            o.dist.Text = distInt .. "m"
+        end
+        setVis(o, o.dist, "distVis", true)
+        belowY = belowY + 13
+    else
+        setVis(o, o.dist, "distVis", false)
+    end
+
+    if showHp then
+        o.hpNum.Position = rv2(centerX, belowY)
+        local hpStr = o._hpStr or "?"
+        if o.cache.hpNumTxt ~= hpStr then
+            o.cache.hpNumTxt = hpStr
+            o.hpNum.Text = hpStr
+        end
+        o.hpNum.Color = o._hpColor or Color3.fromRGB(60, 220, 80)
+        setVis(o, o.hpNum, "hpNumVis", true)
+    else
+        setVis(o, o.hpNum, "hpNumVis", false)
+    end
+
+    if PLAYER_ESP.ShowTracer then
+        o.tracer.From = rv2(vpW * 0.5, vpH)
+        o.tracer.To = rv2(centerX, bottomY)
+        setVis(o, o.tracer, "tracerVis", true)
+    else
+        setVis(o, o.tracer, "tracerVis", false)
+    end
+end
+
+local function espUpdate(dt)
     if not Features.PlayerESP then
         for _, o in pairs(PLAYER_ESP.Objects) do hideEspObj(o) end
         return
     end
+
     local myPos = localRootPos()
+    local vpW, vpH = viewportSize()
     local col = PLAYER_ESP.Color
-    local vpW, vpH = 2560, 1440
-    pcall(function() local c = Workspace.CurrentCamera; vpW, vpH = c.ViewportSize.X, c.ViewportSize.Y end)
+    local colVer = PLAYER_ESP._colVer or 0
 
-    -- Count objects + clear cull flags in one cheap pass (no position reads).
-    local MAX_RENDER = PLAYER_ESP.MaxRender or 22
-    local count = 0
-    for _, o in pairs(PLAYER_ESP.Objects) do o._culled = false; count = count + 1 end
+    markPlayerCull(myPos)
+    for _, o in pairs(PLAYER_ESP.Objects) do
+        local ok = pcall(drawPlayer, o, myPos, vpW, vpH, col, colVer, dt)
+        if not ok then hideEspObj(o) end
+    end
+end
 
-    -- Only run the closest-N cull pre-pass when the server actually has more
-    -- players than the cap. In normal servers this whole block is skipped — no
-    -- per-frame distance reads / sort / table allocation.
-    if count > MAX_RENDER and myPos then
-        local list = {}
-        for _, o in pairs(PLAYER_ESP.Objects) do
-            local m = o.model
-            if m and m.Parent then
-                local hrp = o.hrp
-                if not hrp or not hrp.Parent then
-                    hrp = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-                    o.hrp = hrp
-                end
-                if hrp then
-                    local ok, p = pcall(function() return hrp.Position end)
-                    if ok and p then list[#list + 1] = { o = o, d = (p - myPos).Magnitude } end
-                end
-            end
+local function drawTitan(o, myPos)
+    local model = o.model
+    if not model or not model.Parent then hideTitanObj(o); return end
+
+    local root = o.hrp
+    if not root or not root.Parent then
+        root = getRoot(model)
+        o.hrp = root
+    end
+    if not root then hideTitanObj(o); return end
+
+    local pos = root.Position
+    local dist = myPos and (pos - myPos).Magnitude or nil
+    if dist and dist > TITAN_ESP.MaxDistance then hideTitanObj(o); return end
+
+    local headS, onHead = project(pos + TITAN_HEAD_OFF)
+    local footS, onFoot = project(pos - TITAN_FOOT_OFF)
+    if not (headS and footS) or (not onHead and not onFoot) then hideTitanObj(o); return end
+
+    o.cache.hidden = nil
+    local topY = min(headS.Y, footS.Y)
+    local bottomY = max(headS.Y, footS.Y)
+    local boxH = max(8, bottomY - topY)
+    local boxW = boxH * 0.50
+    local centerX = (headS.X + footS.X) * 0.5
+    local boxX = centerX - boxW * 0.5
+
+    o.box.Position = rv2(boxX, topY)
+    o.box.Size = rv2(boxW, boxH)
+    o.box.Color = TITAN_ESP.Color
+    setVis(o, o.box, "boxVis", true)
+
+    local label = "Titan" .. (dist and ("  " .. floor(dist + 0.5) .. "m") or "")
+    o.name.Position = rv2(centerX, topY - 16)
+    o.name.Color = TITAN_ESP.Color
+    if o.cache.nameTxt ~= label then
+        o.cache.nameTxt = label
+        o.name.Text = label
+    end
+    setVis(o, o.name, "nameVis", true)
+
+    local napeHp = tonumber(model:GetAttribute("NapeHealth"))
+    if napeHp and boxH > 4 then
+        o.maxNape = max(o.maxNape or napeHp, napeHp)
+        local pct = (o.maxNape > 0) and max(0, min(1, napeHp / o.maxNape)) or 0
+        local barW = 3
+        local fillH = boxH * pct
+        local hpColor = Color3.fromRGB(floor(255 * (1 - pct)), floor(220 * pct), 60)
+        o.hpFill.Position = rv2(boxX - barW - 3, topY + (boxH - fillH))
+        o.hpFill.Size = rv2(barW, fillH)
+        o.hpFill.Color = hpColor
+        setVis(o, o.hpFill, "hpFillVis", true)
+
+        local hpText = "Nape " .. floor(napeHp + 0.5)
+        o.hpNum.Position = rv2(centerX, bottomY + 1)
+        o.hpNum.Color = hpColor
+        if o.cache.hpNumTxt ~= hpText then
+            o.cache.hpNumTxt = hpText
+            o.hpNum.Text = hpText
         end
-        if #list > MAX_RENDER then
-            table.sort(list, function(a, b) return a.d < b.d end)
-            for i = MAX_RENDER + 1, #list do list[i].o._culled = true end
-        end
+        setVis(o, o.hpNum, "hpNumVis", true)
+    else
+        setVis(o, o.hpFill, "hpFillVis", false)
+        setVis(o, o.hpNum, "hpNumVis", false)
     end
 
-    for key, o in pairs(PLAYER_ESP.Objects) do
-        local model = o.model
-        local hide = false
-        -- Culled (beyond the closest-N cap) → hide and skip all the expensive
-        -- box/name/hp drawing for this player this frame.
-        if o._culled then
-            hide = true
-        -- If model briefly has no Parent (between respawn frames), skip this
-        -- frame entirely instead of hiding+rebuilding visuals.
-        elseif not model or not model.Parent then
-            -- Don't hide — just leave the ESP elements where they were last frame.
-            -- The next scan tick will update o.model to the new respawn model.
+    if Features.TitanNapeMarker then
+        local napePos
+        if not Features.NapeFollow then
+            local dp = model:FindFirstChild("DamagePoints")
+            local np = dp and dp:FindFirstChild("Nape")
+            if np then napePos = np.Position end
+        end
+        if not napePos then
+            local head = model:FindFirstChild("Head")
+            napePos = head and head.Position or (pos + V3(0, 5, 0))
+        end
+        local ns, onN = project(napePos)
+        if ns and onN then
+            o.nape.Position = rv2(ns.X, ns.Y)
+            o.nape.Radius = dist and max(3, min(11, 700 / max(1, dist))) or 6
+            o.nape.Color = TITAN_ESP.NapeColor
+            setVis(o, o.nape, "napeVis", true)
         else
-            -- Entire per-player visual update runs in ONE pcall instead of ~18
-            -- inner pcall closures. Eliminating that per-frame closure storm is
-            -- the main perf/GC win in populated servers. setVis/setBox/setLine
-            -- use direct assignment now (they're protected by this outer pcall).
-            local ok = pcall(function()
-                local hrp = o.hrp
-                if not hrp or not hrp.Parent then
-                    hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-                    o.hrp = hrp
-                end
-                local pos = hrp and hrp.Position or nil
-                if not pos then hide = true; return end
-
-                -- Position smoothing — lerp toward the real position so choppy
-                -- server updates glide instead of snapping. Snap on big jumps.
-                if o.smoothPos and (o.smoothPos - pos).Magnitude < 40 then
-                    o.smoothPos = o.smoothPos:Lerp(pos, 0.45)
-                else
-                    o.smoothPos = pos
-                end
-                pos = o.smoothPos
-                local d = myPos and (pos - myPos).Magnitude or nil
-                if d and d > PLAYER_ESP.MaxDistance then hide = true; return end
-
-                local headS, onHead = WorldToScreen(pos + Vector3.new(0, 3, 0))
-                local footS, onFoot = WorldToScreen(pos - Vector3.new(0, 3, 0))
-                -- Only hide if FULLY off-screen (allow partial so it doesn't pop).
-                if not (headS and footS) or (not onHead and not onFoot) then hide = true; return end
-
-                o.cache.hidden = nil  -- visible again (lets hideEspObj fire later)
-                local cache = o.cache
-                if cache.col ~= col then
-                    cache.col = col
-                    o.box.Color = col; o.name.Color = col; o.dist.Color = col; o.tracer.Color = col
-                end
-                local topY = headS.Y
-                local boxH = footS.Y - topY
-                local boxW = boxH * 0.42
-                local centerX = (headS.X + footS.X) / 2
-                local boxX = centerX - boxW / 2
-
-                -- Box: single Square outline (1 object instead of 8 lines)
-                if PLAYER_ESP.ShowBox and boxH > 0 then
-                    o.box.Position = Vector2.new(boxX, topY)
-                    o.box.Size = Vector2.new(boxW, boxH)
-                    setVis(o, o.box, "boxVis", true)
-                else setVis(o, o.box, "boxVis", false) end
-
-                if not o.displayName then
-                    local fn = model:GetAttribute("FirstName")
-                    if fn == nil then
-                        local fc = model:FindFirstChild("FirstName")
-                        if fc then fn = fc.Value end
-                    end
-                    if type(fn) == "string" and fn ~= "" then
-                        o.displayName = fn .. " (" .. model.Name .. ")"
-                    end
-                end
-
-                -- Name: centered + outlined text above the box (no background pill)
-                local nameStr = PLAYER_ESP.ShowName and (o.displayName or model.Name) or ""
-                if nameStr ~= "" then
-                    o.name.Position = Vector2.new(centerX, topY - 16)
-                    if cache.nameTxt ~= nameStr then cache.nameTxt = nameStr; o.name.Text = nameStr end
-                    setVis(o, o.name, "nameVis", true)
-                else setVis(o, o.name, "nameVis", false) end
-
-                -- Health: thin vertical bar left of the box + a number. Compute first
-                -- so the number can join the stacked text below the box.
-                local showHp = PLAYER_ESP.ShowHealthBar and boxH > 4
-                local hpStr, hpColor
-                if showHp then
-                    local hum = o.hum
-                    if not hum or not hum.Parent then
-                        hum = model:FindFirstChildWhichIsA("Humanoid")
-                        o.hum = hum
-                    end
-                    local hp, maxHp = 1, 1
-                    if hum then hp = hum.Health; maxHp = hum.MaxHealth end
-                    local pct = maxHp > 0 and math.max(0, math.min(1, hp / maxHp)) or 0
-                    hpColor = Color3.fromRGB(math.floor(255 * (1 - pct)), math.floor(220 * pct), 60)
-                    local barW = 3
-                    local barX = boxX - barW - 3
-                    local fillH = boxH * pct
-                    o.hpFill.Position = Vector2.new(barX, topY + (boxH - fillH))
-                    o.hpFill.Size = Vector2.new(barW, fillH)
-                    o.hpFill.Color = hpColor
-                    setVis(o, o.hpFill, "hpFillVis", true)
-                    hpStr = tostring(math.floor(hp))
-                else
-                    setVis(o, o.hpFill, "hpFillVis", false)
-                end
-
-                -- Stack centered+outlined text below the box: distance, then HP number.
-                local belowY = footS.Y + 1
-                local distStr = (PLAYER_ESP.ShowDistance and d) and (math.floor(d + 0.5) .. "m") or ""
-                if distStr ~= "" then
-                    o.dist.Position = Vector2.new(centerX, belowY)
-                    if cache.distTxt ~= distStr then cache.distTxt = distStr; o.dist.Text = distStr end
-                    setVis(o, o.dist, "distVis", true)
-                    belowY = belowY + 13
-                else setVis(o, o.dist, "distVis", false) end
-                if showHp then
-                    o.hpNum.Position = Vector2.new(centerX, belowY)
-                    if cache.hpNumTxt ~= hpStr then cache.hpNumTxt = hpStr; o.hpNum.Text = hpStr end
-                    o.hpNum.Color = hpColor
-                    setVis(o, o.hpNum, "hpNumVis", true)
-                else setVis(o, o.hpNum, "hpNumVis", false) end
-
-                if PLAYER_ESP.ShowTracer then
-                    o.tracer.From = Vector2.new(vpW / 2, vpH)
-                    o.tracer.To = Vector2.new(centerX, footS.Y)
-                    setVis(o, o.tracer, "tracerVis", true)
-                else setVis(o, o.tracer, "tracerVis", false) end
-            end)
-            if not ok then hide = true end
+            setVis(o, o.nape, "napeVis", false)
         end
-        if hide then hideEspObj(o) end
+    else
+        setVis(o, o.nape, "napeVis", false)
     end
+end
+
+local function titanEspUpdate()
+    if not Features.TitanESP then
+        for _, o in pairs(TITAN_ESP.Objects) do hideTitanObj(o) end
+        return
+    end
+
+    local myPos = localRootPos()
+    for _, o in pairs(TITAN_ESP.Objects) do
+        local ok = pcall(drawTitan, o, myPos)
+        if not ok then hideTitanObj(o) end
+    end
+end
+
+local function freeEspPools()
+    for key, o in pairs(PLAYER_ESP.Objects) do
+        removeEspObj(o)
+        PLAYER_ESP.Objects[key] = nil
+    end
+    for key, o in pairs(TITAN_ESP.Objects) do
+        removeTitanObj(o)
+        TITAN_ESP.Objects[key] = nil
+    end
+end
+
+GUI.StopEspLoops = function()
+    local state = _G.__VERFALL_MATCHA_ESP
+    if state then state.stop = true end
+    if state and state.teardown then
+        pcall(state.teardown)
+    else
+        freeEspPools()
+        _G.__VERFALL_MATCHA_ESP = nil
+    end
+end
+
+GUI.StartEspLoops = function()
+    local old = _G.__VERFALL_MATCHA_ESP
+    if old then
+        if old.teardown then
+            pcall(old.teardown)
+        else
+            old.stop = true
+            freeEspPools()
+        end
+    end
+
+    local state = { stop = false }
+    _G.__VERFALL_MATCHA_ESP = state
+    state.teardown = function()
+        if state._freed then return end
+        state.stop = true
+        state._freed = true
+        if _G.__VERFALL_MATCHA_ESP == state then
+            _G.__VERFALL_MATCHA_ESP = nil
+        end
+        freeEspPools()
+    end
+
+    task.spawn(function()
+        -- Discovery runs as CHUNKED steppers (espScanStep / titanScanStep): each 20Hz tick
+        -- processes only a few targets, so the server-wide folder read is spread across frames
+        -- and never blocks the render loop in one burst (that burst was the steady ~1s stutter).
+        -- They self-pace a fresh pass every ESP_SCAN_INTERVAL via their own _pNextAt/_tNextAt.
+        while GUI.Running and _G.__VERFALL_MATCHA_ESP == state and not state.stop do
+            local nowc = os.clock()
+            if Features.PlayerESP then pcall(espScanStep, nowc) end
+            if Features.TitanESP then pcall(titanScanStep, nowc) end
+            task.wait(0.05)
+        end
+    end)
+
+    task.spawn(function()
+        local interval = 1 / ESP_RENDER_HZ
+        local last = os.clock()
+        while GUI.Running and _G.__VERFALL_MATCHA_ESP == state and not state.stop do
+            local now = os.clock(); local dt = now - last; last = now
+            pcall(espUpdate, dt)
+            pcall(titanEspUpdate)
+            task.wait(interval)
+        end
+    end)
+end
+
 end
 
 -- ============================================================
@@ -3978,6 +2303,7 @@ end
 
 local function UnloadScript()
     GUI.Running = false
+    pcall(function() if GUI.StopEspLoops then GUI.StopEspLoops() end end)
     -- Tear down the INS-ui window (cleanup closure is installed at startup)
     pcall(function() if _G.MatchaCleanup then _G.MatchaCleanup() end end)
     _G.MatchaCleanup = nil
@@ -4001,194 +2327,17 @@ local function UnloadScript()
     for _, el in ipairs(GUI.SubTabElements)  do pcall(function() el:Remove() end) end
     for _, el in ipairs(GUI.RSDiffElements)  do pcall(function() el:Remove() end) end
     for _, el in ipairs(GUI.EnchantsElements) do pcall(function() el:Remove() end) end
-    for _, o in pairs(PLAYER_ESP.Objects)    do removeEspObj(o) end
     GUI.Elements, GUI.ContentElements, GUI.SubTabElements, GUI.RSDiffElements, GUI.EnchantsElements = {}, {}, {}, {}, {}
     GUI.Clickables, GUI.SubTabClickables, GUI.RSDiffClickables, GUI.EnchantsClickables, PLAYER_ESP.Objects = {}, {}, {}, {}, {}
     _G.VERFALL = nil
 end
 
+_G.VERFALL = { unload = UnloadScript }
+
 -- ============================================================
 -- LOOPS
 -- ============================================================
 
--- ESP rendering runs on RenderStepped so it's in sync with the camera —
--- no one-frame delay when you move the camera fast. Scan runs separately
--- on a 0.5s timer (cheap, doesn't need per-frame).
-local _espScanTimer = 0
--- ============================================================
--- TITAN ESP (box + HP bar/number + nape marker) — own object pool
--- ============================================================
-local TITAN_ESP = {
-    Objects     = {},
-    Color       = Color3.fromRGB(255, 120, 40),  -- orange box/label
-    NapeColor   = Color3.fromRGB(255, 60, 60),    -- bright red nape ring
-    MaxDistance = 100000,
-}
-local function makeTitanObj(model)
-    local box = Drawing.new("Square")
-    box.Thickness = 1; box.Filled = false; box.Color = TITAN_ESP.Color
-    box.Visible = false; box.ZIndex = 2
-    local name = Drawing.new("Text")
-    name.Size = 13; name.Center = true; name.Outline = true; name.Font = Drawing.Fonts.System
-    name.Color = TITAN_ESP.Color; name.Visible = false; name.ZIndex = 3
-    local hpFill = Drawing.new("Square")
-    hpFill.Filled = true; hpFill.Color = Color3.fromRGB(60, 220, 80)
-    hpFill.Visible = false; hpFill.ZIndex = 2
-    local hpNum = Drawing.new("Text")
-    hpNum.Size = 12; hpNum.Center = true; hpNum.Outline = true; hpNum.Font = Drawing.Fonts.System
-    hpNum.Color = Color3.fromRGB(60, 220, 80); hpNum.Visible = false; hpNum.ZIndex = 3
-    local nape = Drawing.new("Circle")
-    nape.Thickness = 2; nape.Filled = false; nape.NumSides = 14; nape.Radius = 5
-    nape.Color = TITAN_ESP.NapeColor; nape.Visible = false; nape.ZIndex = 3
-    return { model = model, hrp = nil, hum = nil,
-             box = box, name = name, hpFill = hpFill, hpNum = hpNum, nape = nape, cache = {} }
-end
-local function hideTitanObj(o)
-    if o.cache.hidden then return end
-    o.cache.hidden = true
-    pcall(function()
-        o.box.Visible = false; o.name.Visible = false
-        o.hpFill.Visible = false; o.hpNum.Visible = false; o.nape.Visible = false
-    end)
-    o.cache.boxVis, o.cache.nameVis, o.cache.hpFillVis, o.cache.hpNumVis, o.cache.napeVis = false, false, false, false, false
-end
-local function removeTitanObj(o)
-    pcall(function() o.box:Remove() end);    pcall(function() o.name:Remove() end)
-    pcall(function() o.hpFill:Remove() end); pcall(function() o.hpNum:Remove() end)
-    pcall(function() o.nape:Remove() end)
-end
-local function titanScan()
-    local world = Workspace:FindFirstChild("World")
-    local titans = world and world:FindFirstChild("Titans")
-    if not titans then
-        for k, o in pairs(TITAN_ESP.Objects) do removeTitanObj(o); TITAN_ESP.Objects[k] = nil end
-        return
-    end
-    local present = {}
-    for _, model in ipairs(titans:GetChildren()) do
-        if model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart then
-            present[model] = true
-            if not TITAN_ESP.Objects[model] then TITAN_ESP.Objects[model] = makeTitanObj(model) end
-        end
-    end
-    for k, o in pairs(TITAN_ESP.Objects) do
-        if not present[k] then removeTitanObj(o); TITAN_ESP.Objects[k] = nil end
-    end
-end
-local function titanEspUpdate()
-    if not Features.TitanESP then
-        for _, o in pairs(TITAN_ESP.Objects) do hideTitanObj(o) end
-        return
-    end
-    local myPos = localRootPos()
-    for model, o in pairs(TITAN_ESP.Objects) do
-        if not model or not model.Parent then
-            hideTitanObj(o)
-        else
-            -- Box + name first, in their OWN pcall. HP/nape reads go in SEPARATE pcalls
-            -- below so if a titan-Humanoid read throws it can't hide the box (that was the
-            -- bug — one error hid everything). Direct .Visible like the working standalone.
-            local shown = false
-            pcall(function()
-                local hrp = o.hrp
-                if not hrp or not hrp.Parent then
-                    hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-                    o.hrp = hrp
-                end
-                local pos = hrp and hrp.Position or nil
-                if not pos then return end
-                local d = myPos and (pos - myPos).Magnitude or nil
-                if d and d > TITAN_ESP.MaxDistance then return end
-                local headS, onHead = WorldToScreen(pos + Vector3.new(0, 9, 0))
-                local footS, onFoot = WorldToScreen(pos - Vector3.new(0, 9, 0))
-                if not (headS and footS) or (not onHead and not onFoot) then return end
-                local topY = headS.Y
-                local boxH = footS.Y - topY
-                local boxW = boxH * 0.5
-                local centerX = (headS.X + footS.X) / 2
-                o.box.Position = Vector2.new(centerX - boxW / 2, topY)
-                o.box.Size = Vector2.new(boxW, boxH)
-                o.box.Visible = true
-                o.name.Position = Vector2.new(centerX, topY - 16)
-                o.name.Text = "Titan" .. (d and ("  " .. math.floor(d + 0.5) .. "m") or "")
-                o.name.Visible = true
-                -- stash geometry for the HP/nape passes
-                o._cx, o._topY, o._boxH, o._boxX, o._footY, o._d, o._pos = centerX, topY, boxH, centerX - boxW / 2, footS.Y, d, pos
-                o.cache.hidden = nil
-                shown = true
-            end)
-            if not shown then
-                hideTitanObj(o)
-            else
-                -- NAPE HEALTH (the real titan HP — what kills it). Humanoid.Health is
-                -- 100/inf and useless; NapeHealth is an attribute on the titan model.
-                -- Track the max we've seen per titan for the bar fill.
-                pcall(function()
-                    local nape = model:GetAttribute("NapeHealth")
-                    if nape and o._boxH > 4 then
-                        o.maxNape = math.max(o.maxNape or nape, nape)
-                        local pct = (o.maxNape > 0) and math.max(0, math.min(1, nape / o.maxNape)) or 0
-                        local barW = 3
-                        local fillH = o._boxH * pct
-                        o.hpFill.Position = Vector2.new(o._boxX - barW - 3, o._topY + (o._boxH - fillH))
-                        o.hpFill.Size = Vector2.new(barW, fillH)
-                        o.hpFill.Color = Color3.fromRGB(math.floor(255 * (1 - pct)), math.floor(220 * pct), 60)
-                        o.hpFill.Visible = true
-                        o.hpNum.Position = Vector2.new(o._cx, o._footY + 1)
-                        o.hpNum.Text = "Nape " .. math.floor(nape)
-                        o.hpNum.Color = o.hpFill.Color
-                        o.hpNum.Visible = true
-                    else
-                        o.hpFill.Visible = false; o.hpNum.Visible = false
-                    end
-                end)
-                -- Nape marker (separate pcall)
-                pcall(function()
-                    if Features.TitanNapeMarker then
-                        local napePos
-                        if not Features.NapeFollow then
-                            local dp = model:FindFirstChild("DamagePoints")
-                            local np = dp and dp:FindFirstChild("Nape")
-                            if np then napePos = np.Position end
-                        end
-                        if not napePos then
-                            local head = model:FindFirstChild("Head")
-                            napePos = head and head.Position or (o._pos + Vector3.new(0, 5, 0))
-                        end
-                        local ns, onN = WorldToScreen(napePos)
-                        if ns and onN then
-                            o.nape.Position = Vector2.new(ns.X, ns.Y)
-                            o.nape.Radius = o._d and math.max(3, math.min(11, 700 / math.max(1, o._d))) or 6
-                            o.nape.Visible = true
-                        else o.nape.Visible = false end
-                    else o.nape.Visible = false end
-                end)
-            end
-        end
-    end
-end
-
-local _titanScanTimer = 0
-local _espRender
-_espRender = game:GetService("RunService").RenderStepped:Connect(function(dt)
-    if not GUI.Running then _espRender:Disconnect() return end
-    if Features.PlayerESP then
-        _espScanTimer = _espScanTimer + dt
-        if _espScanTimer >= 0.5 then
-            _espScanTimer = 0
-            pcall(espScan)
-        end
-    end
-    pcall(espUpdate)
-    if Features.TitanESP then
-        _titanScanTimer = _titanScanTimer + dt
-        if _titanScanTimer >= 0.4 then
-            _titanScanTimer = 0
-            pcall(titanScan)
-        end
-    end
-    pcall(titanEspUpdate)
-end)
 
 local function FeatureLoop()
     while GUI.Running do
@@ -4196,357 +2345,6 @@ local function FeatureLoop()
     end
 end
 
--- Sprint feature removed — see Player card comment in PageMainElements.
-
--- Mouse wheel scrolling for Enchants panel (graceful no-op if Matcha blocks the event)
-local _scrollConn
-local ok_ic, ic_signal = pcall(function() return UIS.InputChanged end)
-if ok_ic and ic_signal then
-    local ok_conn = pcall(function()
-        _scrollConn = ic_signal:Connect(function(input)
-            if not GUI.Running then if _scrollConn then _scrollConn:Disconnect() end; return end
-            if not GUI.EnchantsOpen then return end
-            if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
-            local mx, my = Mouse.X, Mouse.Y
-            if not IsInside(mx, my, GUI.EnchantsX, GUI.EnchantsY, GUI.EnchantsW, GUI.EnchantsH) then return end
-            local delta = input.Position.Z
-            if delta > 0 then
-                GUI.EnchantsScrollOffset = math.max(0, GUI.EnchantsScrollOffset - 2)
-            elseif delta < 0 then
-                GUI.EnchantsScrollOffset = GUI.EnchantsScrollOffset + 2
-            end
-            BuildEnchantsPanel()
-        end)
-    end)
-    if not ok_conn then
-        print("[Verfall] mouse wheel scroll not available (Matcha blocks UIS.InputChanged)")
-    end
-else
-    print("[Verfall] mouse wheel scroll unavailable — use arrow buttons in panel")
-end
-
--- Buff number-input key handler: digits 0-9 append, Backspace deletes,
--- Enter commits, Escape cancels.
--- VK codes: 0x30-0x39 = digits, 0x60-0x69 = numpad digits, 0x08 = Back, 0x0D = Enter, 0x1B = Esc
-local NUM_VKS = {
-    [0x30]="0",[0x31]="1",[0x32]="2",[0x33]="3",[0x34]="4",
-    [0x35]="5",[0x36]="6",[0x37]="7",[0x38]="8",[0x39]="9",
-    [0x60]="0",[0x61]="1",[0x62]="2",[0x63]="3",[0x64]="4",
-    [0x65]="5",[0x66]="6",[0x67]="7",[0x68]="8",[0x69]="9",
-    -- Decimal point support: regular . and numpad .
-    [0xBE]=".",[0x6E]=".",
-}
-
-local function commitBuffInput()
-    local key = GUI.ActiveInput
-    if not key then return end
-    local b = BuffsState[key]
-    if not b then GUI.ActiveInput = nil; GUI.InputBuffer = ""; return end
-    local n = tonumber(GUI.InputBuffer)
-    if n and n > 0 then
-        n = math.min(n, b.max or 100000)
-        b.target = n
-        -- If buff is currently enabled, the Heartbeat pin will pick up new target automatically
-    end
-    GUI.ActiveInput = nil
-    GUI.InputBuffer = ""
-    GUI.InputLastKey = {}
-    CreateContent(GUI.SelectedPage)
-end
-
-local function cancelBuffInput()
-    GUI.ActiveInput = nil
-    GUI.InputBuffer = ""
-    GUI.InputLastKey = {}
-    CreateContent(GUI.SelectedPage)
-end
-
--- Shared GUI show/hide. Called from BOTH the poll loop (rising edge) and the
--- UIS.InputBegan event (which re-checks the real F3 state in laggy servers where the
--- poll loop stretches and drops spammed taps). The 0.18s debounce dedupes so the two
--- paths can't double-toggle the same press. Visibility only — never unloads.
-local function doToggleVisibility()
-    if tick() - (GUI._lastToggleAt or 0) < 0.18 then return end
-    GUI._lastToggleAt = tick()
-    GUI.Visible = not GUI.Visible
-    for _, el in ipairs(GUI.Elements) do pcall(function() el.Visible = GUI.Visible end) end
-    for _, el in ipairs(GUI.RSDiffElements)   do pcall(function() el.Visible = GUI.Visible and GUI.RSDiffOpen end) end
-    for _, el in ipairs(GUI.EnchantsElements) do pcall(function() el.Visible = GUI.Visible and GUI.EnchantsOpen end) end
-    if GUI.Visible then CreateContent(GUI.SelectedPage) else ClearContent(); ClearSubTabs() end
-end
-
--- Event-driven click dispatch. Pulled out of the poll loop so UIS.InputBegan can
--- fire it the instant a click happens. In laggy servers the poll loop's task.wait
--- stretches to the frame time (100-300ms), so a click that goes down+up between
--- two polls was silently dropped — the "have to click 20 times" bug. The event
--- path catches every physical press exactly once regardless of frame rate.
-local function processMousePress(mx, my)
-    if not GUI.Visible then return end
-    local onHeader = IsInside(mx, my, Config.WinX, Config.WinY, Config.WinW, Config.HeaderH)
-    local handled = false
-
-    -- Enchants panel clickables (highest priority among floats)
-    if GUI.EnchantsOpen then
-        for _, c in ipairs(GUI.EnchantsClickables) do
-            if IsInside(mx, my, c.x, c.y, c.w, c.h) then
-                pcall(c.onClick)
-                handled = true; break
-            end
-        end
-        if not handled then
-            local hx, hy, hw, hh = GUI.EnchantsX, GUI.EnchantsY, GUI.EnchantsW, 34
-            if IsInside(mx, my, hx, hy, hw, hh) then
-                GUI.EnchantsDragging = true
-                GUI.EnchantsDragOffsetX = mx - GUI.EnchantsX
-                GUI.EnchantsDragOffsetY = my - GUI.EnchantsY
-                handled = true
-            end
-        end
-    end
-
-    -- RS Diff panel clickables
-    if not handled and GUI.RSDiffOpen then
-        for _, c in ipairs(GUI.RSDiffClickables) do
-            if IsInside(mx, my, c.x, c.y, c.w, c.h) then
-                pcall(c.onClick)
-                handled = true; break
-            end
-        end
-        if not handled then
-            local hx, hy, hw, hh = GUI.RSDiffX, GUI.RSDiffY, GUI.RSDiffW, 34
-            if IsInside(mx, my, hx, hy, hw, hh) then
-                GUI.RSDiffDragging = true
-                GUI.RSDiffDragOffsetX = mx - GUI.RSDiffX
-                GUI.RSDiffDragOffsetY = my - GUI.RSDiffY
-                handled = true
-            end
-        end
-    end
-
-    if not handled then
-        for _, c in ipairs(GUI.SubTabClickables) do
-            if IsInside(mx, my, c.x, c.y, c.w, c.h) then c.onClick(); handled = true; break end
-        end
-    end
-    if not handled then
-        for _, c in ipairs(GUI.Clickables) do
-            if IsInside(mx, my, c.x, c.y, c.w, c.h) then
-                if c.isSlider then
-                    c.onClick(mx)
-                    GUI.SliderDragging = c
-                else
-                    if c.hover and c.hover.el then pcall(function() c.hover.el.Color = lighten(c.hover.base, 0.18) end) end
-                    c.onClick()
-                end
-                handled = true; break
-            end
-        end
-    end
-    if not handled then
-        for _, btn in ipairs(GUI.NavButtons) do
-            local hx, hy, hw, hh = navHitBounds(btn)
-            if IsInside(mx, my, hx, hy, hw, hh) then
-                handled = true
-                if GUI.SelectedPage ~= btn.Key then
-                    GUI.SelectedPage = btn.Key
-                    for _, b in ipairs(GUI.NavButtons) do UpdateNavButton(b, b.Key == GUI.SelectedPage, false) end
-                    CreateContent(btn.Key)
-                    animateMainTabUnderline(btn)
-                end
-                break
-            end
-        end
-    end
-    if not handled and onHeader and not GUI.Dragging then
-        GUI.Dragging = true
-        GUI.DragOffsetX = mx - Config.WinX
-        GUI.DragOffsetY = my - Config.WinY
-    end
-end
-
-local function InputLoop()
-    while GUI.Running do
-        -- Buff numeric input listener (rising-edge per key)
-        if GUI.ActiveInput then
-            local lastKey = GUI.InputLastKey or {}
-            -- digits
-            for vk, ch in pairs(NUM_VKS) do
-                local down = iskeypressed(vk)
-                if down and not lastKey[vk] then
-                    -- Allow up to 8 chars now (decimals need room). Prevent multiple dots.
-                    local allowDot = (ch == ".") and not GUI.InputBuffer:find(".", 1, true) or ch ~= "."
-                    if #GUI.InputBuffer < 8 and allowDot then
-                        GUI.InputBuffer = GUI.InputBuffer .. ch
-                        CreateContent(GUI.SelectedPage)
-                    end
-                end
-                lastKey[vk] = down
-            end
-            -- backspace
-            local bsDown = iskeypressed(0x08)
-            if bsDown and not lastKey[0x08] then
-                GUI.InputBuffer = GUI.InputBuffer:sub(1, -2)
-                CreateContent(GUI.SelectedPage)
-            end
-            lastKey[0x08] = bsDown
-            -- enter
-            local enDown = iskeypressed(0x0D)
-            if enDown and not lastKey[0x0D] then
-                commitBuffInput()
-            end
-            lastKey[0x0D] = enDown
-            -- escape
-            local escDown = iskeypressed(0x1B)
-            if escDown and not lastKey[0x1B] then
-                cancelBuffInput()
-            end
-            lastKey[0x1B] = escDown
-            GUI.InputLastKey = lastKey
-        end
-
-        local closeDown = iskeypressed(GUI.CloseKey)
-        if GUI.CloseKeyReady then
-            if closeDown and not GUI.WasCloseDown then UnloadScript(); return end
-        elseif not closeDown then GUI.CloseKeyReady = true end
-        GUI.WasCloseDown = closeDown
-
-        -- ESP keybind toggle (rising edge) — silent, no notification/sound
-        -- Skip when typing into a buff input so digits don't double-fire as keybind
-        if not GUI.ListeningForESPKey and not GUI.ActiveInput then
-            local espDown = iskeypressed(GUI.ESPKey)
-            if espDown and not GUI.WasESPDown then
-                Features.PlayerESP = not Features.PlayerESP
-                if GUI.SelectedPage == "Main" and GUI.SubTab == "Elements" then
-                    CreateContent("Main")
-                end
-            end
-            GUI.WasESPDown = espDown
-        end
-        if GUI.ListeningForCloseKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.CloseKey = vk; GUI.ListeningForCloseKey = false
-                    GUI.CloseKeyReady = false; GUI.WasCloseDown = true
-                    if GUI.SelectedPage == "Settings" then CreateContent("Settings") end
-                    task.wait(0.2); break
-                end
-            end
-        end
-        if GUI.ListeningForESPKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.ESPKey = vk; GUI.ListeningForESPKey = false
-                    GUI.WasESPDown = true
-                    -- ESP keybind lives on Main → Elements now
-                    if GUI.SelectedPage == "Main" then CreateContent("Main") end
-                    task.wait(0.2); break
-                end
-            end
-        end
-        if GUI.ListeningForKey then
-            for _, vk in ipairs(VK_SCAN) do
-                if iskeypressed(vk) then
-                    GUI.ToggleKey = vk; GUI.ListeningForKey = false
-                    if GUI.SelectedPage == "Settings" then CreateContent("Settings") end
-                    task.wait(0.2); break
-                end
-            end
-            GUI.WasToggleDown = iskeypressed(GUI.ToggleKey)
-            task.wait(0.012)
-        else
-            local toggleDown = iskeypressed(GUI.ToggleKey)
-            -- Guard against accidental toggle while typing into a buff input
-            if toggleDown and not GUI.WasToggleDown and not GUI.ActiveInput then
-                doToggleVisibility()
-            end
-            GUI.WasToggleDown = toggleDown
-            if GUI.Visible then
-                local mx, my = Mouse.X, Mouse.Y
-                local mouseDown = ismouse1pressed()
-                local justPressed = mouseDown and not GUI.WasMouseDown
-                local onHeader = IsInside(mx, my, Config.WinX, Config.WinY, Config.WinW, Config.HeaderH)
-
-                -- Main window drag
-                if GUI.Dragging then
-                    if mouseDown then
-                        local ddx = (mx - GUI.DragOffsetX) - Config.WinX
-                        local ddy = (my - GUI.DragOffsetY) - Config.WinY
-                        if ddx ~= 0 or ddy ~= 0 then MoveWindow(ddx, ddy) end
-                    else GUI.Dragging = false end
-                end
-
-                -- RS Diff panel drag
-                if GUI.RSDiffDragging then
-                    if mouseDown and GUI.RSDiffOpen then
-                        local newX = mx - GUI.RSDiffDragOffsetX
-                        local newY = my - GUI.RSDiffDragOffsetY
-                        if newX ~= GUI.RSDiffX or newY ~= GUI.RSDiffY then
-                            GUI.RSDiffX = newX
-                            GUI.RSDiffY = newY
-                            BuildRSDiffPanel()
-                        end
-                    else GUI.RSDiffDragging = false end
-                end
-
-                -- Enchants panel drag
-                if GUI.EnchantsDragging then
-                    if mouseDown and GUI.EnchantsOpen then
-                        local newX = mx - GUI.EnchantsDragOffsetX
-                        local newY = my - GUI.EnchantsDragOffsetY
-                        if newX ~= GUI.EnchantsX or newY ~= GUI.EnchantsY then
-                            GUI.EnchantsX = newX
-                            GUI.EnchantsY = newY
-                            BuildEnchantsPanel()
-                        end
-                    else GUI.EnchantsDragging = false end
-                end
-
-                if GUI.SliderDragging and mouseDown then
-                    pcall(function() GUI.SliderDragging.onClick(mx) end)
-                elseif not mouseDown then
-                    GUI.SliderDragging = nil
-                end
-
-                -- Click dispatch is normally handled by the UIS.InputBegan event
-                -- (reliable in lag). This poll-based path only runs as a fallback
-                -- until the event has proven it delivers mouse presses — then it
-                -- stands down so the same click isn't processed twice.
-                if justPressed and not GUI._mouseEventAlive then
-                    processMousePress(mx, my)
-                end
-                -- Hover work is expensive (iterates every clickable + nav button).
-                -- Only run it when the mouse actually moved OR a drag is happening —
-                -- when the cursor is still (most of the time) we skip it entirely.
-                if mx ~= GUI._lastHoverX or my ~= GUI._lastHoverY then
-                    GUI._lastHoverX, GUI._lastHoverY = mx, my
-                    for _, c in ipairs(GUI.Clickables) do
-                        if c.hover and c.hover.el then
-                            local over = IsInside(mx, my, c.x, c.y, c.w, c.h)
-                            if over and not c.hover.hovered then
-                                pcall(function() c.hover.el.Color = lighten(c.hover.base, 0.10) end)
-                                c.hover.hovered = true
-                            elseif (not over) and c.hover.hovered then
-                                pcall(function() c.hover.el.Color = c.hover.base end)
-                                c.hover.hovered = false
-                            end
-                        end
-                    end
-                    for _, btn in ipairs(GUI.NavButtons) do
-                        local hx, hy, hw, hh = navHitBounds(btn)
-                        UpdateNavButton(btn, btn.Key == GUI.SelectedPage, IsInside(mx, my, hx, hy, hw, hh))
-                    end
-                end
-                GUI.WasMouseDown = mouseDown
-            else
-                GUI.WasMouseDown = ismouse1pressed()
-            end
-            -- Poll fast (~83Hz) while the menu is open for snappy clicks; poll
-            -- slower (~33Hz) while hidden — the toggle hotkey stays responsive
-            -- but we stop burning CPU during normal gameplay.
-            task.wait(GUI.Visible and 0.012 or 0.03)
-        end
-    end
-end
 
 -- ============================================================
 -- START
@@ -4608,6 +2406,7 @@ end
 
 pcall(loadConfig)
 espRecolor()
+if GUI.StartEspLoops then GUI.StartEspLoops() end
 
 -- Theme: yellow accent by default (changeable in Settings -> Theme).
 local YELLOW_A = Color3.fromRGB(252, 211, 49)
@@ -4626,24 +2425,27 @@ local window = Lib:CreateWindow({
 LibWindow = window
 _G.MatchaCleanup = function() pcall(function() Lib:Destroy() end) end
 
--- PERF: the ~1s periodic stutter is the library's autosave — every 1.2s it re-serializes
--- the whole config and writefile()s it (a disk-write freeze). Turn it off; Verfall persists
--- via the named config save in the Settings tab instead. (We deliberately DON'T enable lite/performance mode
--- — it strips the menu animations, which are what make it feel smooth.)
+-- PERF: the ~1.2s periodic stutter IS the library autosave — every 1.2s it re-serializes
+-- the whole config and writefile()s it (a disk-write freeze). A SINGLE SetAutoSave(false)
+-- does NOT stick: the lib runs an ASYNC autoload coroutine (task.spawn) that fires a tick
+-- or two AFTER CreateWindow returns and RESTORES the persisted "autosave:" pref from disk
+-- (`if ln~=nil then az.autoSave=ln end`), clobbering our disable back to true. So we
+-- re-assert false for the first several seconds. The autoload only runs ONCE (it's guarded
+-- by _didAutoload), so once we win the race after it fires, autosave stays off for good.
+-- Verfall persists via the named config save in Settings instead. (We deliberately DON'T
+-- enable lite/perf mode — it strips the menu animations that make it feel smooth.)
 pcall(function() Lib:SetAutoSave(false) end)
-
--- One-shot Ackerman pin that doesn't touch the (now-retired) Drawing UI.
-local function pinBuff(key)
-    local b = BuffsState[key]; if not b then return end
-    local ok = (key == "BladeDura") and pinBladeDuraOnce() or pinAttrOnce(key, key)
-    Lib:Notify("Ackerman", ok and ("Pinned " .. key .. " = " .. fmtNum(b.target))
-        or "ClientInformation not found — join a round first", 3, ok and "success" or "warning")
-end
-local function setBuffTarget(key, s)
-    local b = BuffsState[key]; if not b then return end
-    local n = tonumber(s)
-    if n and n > 0 then b.target = math.min(n, b.max or 100000); pinBuff(key) end
-end
+task.spawn(function()
+    -- SetAutoSave is pure-Lua (just sets az.autoSave, no bridge), so re-asserting it is free.
+    -- Pin it OFF FOREVER at 1Hz: the library's async autoload can re-enable autosave from the
+    -- persisted pref a tick or two — or longer — after CreateWindow, so a fixed 12s window can
+    -- expire before the clobber lands and the 1.2s writefile stutter comes back. A permanent
+    -- 1Hz re-assert defeats it for good (the autoload only fires once per session).
+    while GUI.Running do
+        task.wait(1)
+        pcall(function() Lib:SetAutoSave(false) end)
+    end
+end)
 
 -- ===== Tab: Main =====
 -- Each tab's UI is wrapped in do...end so its locals free between tabs, keeping the main
@@ -4766,6 +2568,26 @@ end):Tooltip("ranged nape envelop (musket/crossbow)")
 secTitan:Slider("Range", NapeFollowRange, 1, 30, 900, "", function(v) NapeFollowRange = v end)
 
 end  -- /Character tab
+-- ===== Tab: Tools (wrench) — opens the smooth Requiem-UI RS Diff panel =====
+-- RS Diff is the smooth immediate-mode floating window from the "REQUIEM UI" engine defined
+-- near the top (Snapshot / Compare / Load / Clear + an eased-scroll results list all live ON
+-- the panel, with fade-in, hover, drag and resize — exactly like Menu.lua.bak). This tab is
+-- just the toggle; the engine's own render loop draws + services it from GUI.RSDiffOpen.
+do
+local tabTools = window:Tab("Tools", "wrench")
+
+local secRS = tabTools:Section("ReplicatedStorage Diff", "Left", "Floating Diff Panel")
+GUI._rsToggle = secRS:Toggle("Show RS Diff Panel", GUI.RSDiffOpen, function(v)
+    GUI.RSDiffOpen = v   -- the Requiem UI render loop (defined up top) draws + services the panel from this flag
+end):Tooltip("open the smooth, draggable ReplicatedStorage diff window")
+secRS:Label(function()
+    if GUI.RSDiffStatus ~= "" then return GUI.RSDiffStatus end
+    if GUI.RSSnapshot then
+        return ("Snapshot: %d paths (%s)"):format(GUI.RSSnapshotCount or 0, rsTimeAgo(GUI.RSSnapshotAt))
+    end
+    return "Open the panel, then Snapshot / Compare on it."
+end)
+end  -- /Tools tab
 -- ===== Settings tab (built-in) =====
 do
 local setTab = window:AddSettingsTab("cog")
@@ -4789,6 +2611,8 @@ end)
 secTheme:Slider("Menu Opacity", 100, 5, 40, 100, "%", function(v) pcall(function() Lib:SetOpacity(v) end) end)
 
 local secScript = setTab:Section("Script", "Right", "Config & Exit")
+secScript:Button("Save Config", function() pcall(saveConfig); Lib:Notify("Verfall", "config saved", 3, "success") end):Tooltip("persist binds / ESP / buffs to disk")
+secScript:Button("Load Config", function() pcall(loadConfig); Lib:Notify("Verfall", "config loaded — reload script to refresh toggles", 4) end)
 secScript:Button("Reset Defaults", function() pcall(resetConfig); Lib:Notify("Verfall", "reset — reload script to refresh the menu", 4) end)
 secScript:Button("Unload", function() pcall(UnloadScript) end):SetRisk()
 
@@ -4814,3 +2638,4 @@ end)
 
 Lib:Notify("Verfall", "loaded  -  F3 menu  -  F4 esp  -  End unload", 4)
 print("[Verfall] loaded with INS-ui front-end")
+FeatureLoop()
